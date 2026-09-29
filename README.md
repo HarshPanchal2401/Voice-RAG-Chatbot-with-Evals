@@ -13,7 +13,7 @@ A production-ready, low-latency conversational Retrieval-Augmented Generation (R
 - **Smart Script Detection**: Unicode-based script analyzer detecting Gujarati (`\u0A80-\u0AFF`) and Devanagari/Hindi (`\u0900-\u097F`).
 - **Real-Time Streaming**: Server-Sent Events (SSE) `/stream` and WebSocket endpoints with millisecond-level TTFT metrics.
 - **Automated Evaluation**: Asynchronous evaluation using **DeepEval** (Faithfulness, Answer Relevancy, Recall) and LangSmith tracing.
-- **Web & Chat Interfaces**: Glassmorphic web UI (`static/index.html`) and Streamlit chatbot (`chatbot.py`).
+- **Web & CLI Interfaces**: Glassmorphic web UI (`static/index.html`) and interactive CLI chatbot (`chatbot.py`).
 
 ---
 
@@ -72,9 +72,9 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 - Dashboard: [http://localhost:8000](http://localhost:8000)
 - API Docs (Swagger): [http://localhost:8000/docs](http://localhost:8000/docs)
 
-### Streamlit Chatbot
+### Interactive Voice & Text CLI Chatbot
 ```bash
-streamlit run chatbot.py
+python chatbot.py
 ```
 
 ### Latency Benchmarking

@@ -27,8 +27,7 @@ langsmith>=0.1.90
 # RAG Evaluation
 deepeval>=2.1.0
 
-# Interactive Frontend & Utilities
-streamlit>=1.37.0
+# Utilities & CLI
 python-dotenv>=1.0.1
 requests>=2.32.0
 httpx>=0.27.0
