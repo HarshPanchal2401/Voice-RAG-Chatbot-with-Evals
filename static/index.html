@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="gu">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice + Text RAG — Multi-Language AI Assistant</title>
+  
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  
+  <!-- Modern Google Fonts: Inter, Noto Sans Gujarati & Noto Sans Devanagari -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Noto+Sans+Devanagari:wght@300;400;500;600;700;800&family=Noto+Sans+Gujarati:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="/static/style.css?v=3.2.0">
+</head>
+<body class="light-theme lang-gu">
+  <div class="app-layout">
+    
+    <!-- ======================================================== -->
+    <!-- LEFT SIDEBAR -->
+    <!-- ======================================================== -->
+    <aside class="sidebar-left">
+      <!-- App Brand -->
+      <div class="brand-header">
+        <div class="brand-icon-wrapper">
+          <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+            <line x1="8" x2="16" y1="22" y2="22"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1 class="brand-title" id="brand-app-title">Voice RAG System</h1>
+          <p class="brand-subtitle" id="brand-app-subtitle">Gujarati & Hindi AI Assistant</p>
+        </div>
+      </div>
+
+      <!-- Mode Switcher Tabs -->
+      <div class="mode-switcher">
+        <button id="btn-mode-voice" class="mode-tab active" onclick="switchMode('voice')">
+          <span class="mode-icon">🎙️</span>
+          <span>Voice Mode</span>
+        </button>
+        <button id="btn-mode-chat" class="mode-tab" onclick="switchMode('chat')">
+          <span class="mode-icon">💬</span>
+          <span>Chat Mode</span>
+        </button>
+      </div>
+
+      <!-- Best-Performing Queries Card -->
+      <div class="sidebar-card">
+        <div class="card-header-row">
+          <div class="header-left">
+            <span class="card-title-icon">🎯</span>
+            <h2 class="card-title" id="golden-dataset-title">Golden Dataset Queries</h2>
+          </div>
+          <div class="header-right" style="display: flex; align-items: center; gap: 6px;">
+            <button class="refresh-queries-btn" id="refresh-queries-btn" onclick="fetchSampleQueries()" title="Fetch New Random Queries from Golden Dataset">
+              🔄 <span>Refresh</span>
+            </button>
+            <span class="badge-count" id="sample-count">20</span>
+          </div>
+        </div>
+        <div class="sample-queries-list" id="sample-queries-list">
+          <!-- Populated dynamically by JS from Golden Dataset based on active language -->
+        </div>
+      </div>
+
+      <!-- Asked Queries (Chat History) Card -->
+      <div class="sidebar-card history-card">
+        <div class="card-header-row">
+          <div class="header-left">
+            <span class="card-title-icon">🕒</span>
+            <h2 class="card-title">Asked Queries</h2>
+          </div>
+          <button class="link-btn" onclick="openHistoryModal()">View All</button>
+        </div>
+        <div class="history-list" id="history-list">
+          <p class="empty-state-text">No queries asked yet.</p>
+        </div>
+        <button class="clear-history-btn" onclick="clearHistory()">
+          <span class="icon">🗑️</span> Clear History
+        </button>
+      </div>
+    </aside>
+
+
+    <!-- ======================================================== -->
+    <!-- CENTER MAIN WORKSPACE -->
+    <!-- ======================================================== -->
+    <main class="main-workspace">
+      
+      <!-- Top Navigation Bar -->
+      <header class="top-navbar">
+        <div class="nav-left">
+          <div class="status-pill" id="system-status-pill">
+            <span class="status-dot"></span>
+            <span class="status-text">Model Status: <strong>Online</strong></span>
+          </div>
+        </div>
+
+        <div class="nav-center">
+          <div class="system-title">
+            <span class="system-logo">🧠</span>
+            <span class="system-name" id="nav-system-name">Voice + Text RAG Router</span>
+          </div>
+        </div>
+
+        <div class="nav-right">
+          <!-- Dynamic Language Selector Dropdown -->
+          <div class="lang-dropdown-wrapper" id="top-lang-dropdown">
+            <button class="lang-dropdown-btn" onclick="toggleLanguageMenu(event)" id="current-lang-btn" aria-haspopup="true" aria-expanded="false" title="Switch Language">
+              <span class="lang-globe-icon">🌐</span>
+              <span class="lang-label" id="current-lang-label">ગુજરાતી (Gujarati)</span>
+              <span class="lang-arrow">▾</span>
+            </button>
+            <div class="lang-dropdown-menu" id="lang-dropdown-menu">
+              <button class="lang-menu-item active" data-lang="gu" onclick="selectLanguage('gu', event)">
+                <span class="lang-badge-flag">🇮🇳</span>
+                <div class="lang-info">
+                  <span class="lang-name">ગુજરાતી</span>
+                  <span class="lang-sub">Gujarati (gu-IN)</span>
+                </div>
+                <span class="lang-check" id="check-gu">✓</span>
+              </button>
+              <button class="lang-menu-item" data-lang="hi" onclick="selectLanguage('hi', event)">
+                <span class="lang-badge-flag">🇮🇳</span>
+                <div class="lang-info">
+                  <span class="lang-name">हिन्दी</span>
+                  <span class="lang-sub">Hindi (hi-IN)</span>
+                </div>
+                <span class="lang-check" id="check-hi" style="display: none;">✓</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Theme Switcher -->
+          <button class="icon-action-btn" id="theme-toggle-btn" title="Toggle Light/Dark Theme" onclick="toggleTheme()">
+            <span id="theme-icon">☀️</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Dynamic Voice Interaction Stage (Prominent in Voice Mode) -->
+      <section class="voice-stage" id="voice-stage">
+        <div class="voice-stage-header">
+          <div class="voice-stage-title">
+            <span class="wave-icon">∿∿∿</span> Voice Interaction
+          </div>
+          <div class="voice-lang-pill" id="voice-lang-pill" onclick="toggleLanguageMenu(event)" title="Click to switch language">
+            <span class="lang-icon">文A</span>
+            <span id="voice-stage-lang-name">ગુજરાતી (Gujarati)</span>
+            <span class="pill-arrow">▾</span>
+          </div>
+        </div>
+
+        <!-- Animated Canvas Waveform Visualizer -->
+        <div class="waveform-container">
+          <canvas id="waveform-canvas" width="600" height="70"></canvas>
+        </div>
+
+        <!-- Central Glowing Microphone Control Button -->
+        <div class="mic-control-wrapper">
+          <button id="main-mic-btn" class="mic-hero-btn" onclick="toggleVoiceRecording()" title="Click to speak">
+            <div class="mic-pulse-ring ring-1"></div>
+            <div class="mic-pulse-ring ring-2"></div>
+            <svg class="mic-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" x2="12" y1="19" y2="22"/>
+              <line x1="8" x2="16" y1="22" y2="22"/>
+            </svg>
+          </button>
+          
+          <div class="mic-status-row">
+            <div class="listening-pill" id="listening-indicator" style="display: none;">
+              <span class="listening-dot"></span>
+              <span>Listening...</span>
+            </div>
+            <div class="speak-prompt-pill" id="speak-prompt-pill">
+              <span id="speak-prompt-text">Speak in Gujarati</span>
+              <span class="audio-bars-mini"><span></span><span></span><span></span></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Voice Transcript Live Box -->
+        <div class="voice-transcript-card" id="voice-transcript-card" style="display: none;">
+          <div class="transcript-header">
+            <span class="mic-small-icon">🎙️</span>
+            <span class="transcript-title">Voice Transcript</span>
+            <span class="transcript-time" id="transcript-timestamp">11:24:31 AM</span>
+          </div>
+          <p class="transcript-body" id="transcript-text">...</p>
+        </div>
+      </section>
+
+      <!-- Chat Conversation Feed -->
+      <section class="chat-feed" id="chat-feed">
+        <!-- Messages will be appended dynamically by JavaScript -->
+      </section>
+
+      <!-- Bottom User Prompt Input Bar -->
+      <footer class="bottom-input-bar">
+        <div class="input-container">
+          <!-- Audio File Upload -->
+          <button class="input-action-btn" id="upload-audio-btn" title="Upload Audio File (WAV/MP3/M4A)" onclick="triggerAudioUpload()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+            </svg>
+          </button>
+          <input type="file" id="audio-file-input" accept="audio/*" style="display: none;" onchange="handleAudioFileUpload(event)">
+
+          <!-- Text Query Input Area -->
+          <textarea 
+            id="query-input" 
+            class="query-textarea" 
+            placeholder="ગુજરાતી માં પ્રશ્ન લખો... (Type your question in Gujarati or English)" 
+            rows="1"
+            maxlength="1000"
+            oninput="handleInputResize(this)"
+            onkeydown="handleInputKeyDown(event)"
+          ></textarea>
+
+          <!-- Input Controls -->
+          <div class="input-trailing-controls">
+            <!-- Evaluation Toggle Button -->
+            <label class="eval-toggle-label" title="Calculate DeepEval Ground Truth Evaluation Score">
+              <input type="checkbox" id="eval-toggle" checked>
+              <span class="eval-checkbox-custom"></span>
+              <span class="eval-toggle-text">Evaluation 🎯</span>
+            </label>
+
+            <span class="char-counter" id="char-counter">0 / 1000</span>
+            <button id="send-query-btn" class="send-btn" onclick="submitCurrentQuery()" title="Send Question">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <line x1="22" x2="11" y1="2" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+              <span>Send</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="input-footer-note">
+          <span id="footer-system-note">Powered by Multi-Language Hybrid RAG • BGE-M3 + FAISS HNSW • Gujarati & Hindi NLP</span>
+          <span class="safety-badge">🛡️ Verified Engine</span>
+        </div>
+      </footer>
+    </main>
+
+
+    <!-- ======================================================== -->
+    <!-- RIGHT SIDEBAR (LATENCY & EVALUATION SCORECARDS) -->
+    <!-- ======================================================== -->
+    <aside class="sidebar-right">
+      
+      <!-- Response Latency Profiler Card -->
+      <div class="sidebar-card latency-card">
+        <div class="card-header-row">
+          <div class="header-left">
+            <span class="card-title-icon">⏱️</span>
+            <h2 class="card-title">Response Latency</h2>
+          </div>
+          <span class="realtime-badge">Real-time</span>
+        </div>
+
+        <div class="latency-main-display">
+          <div class="latency-value-row">
+            <span class="latency-label">Total Latency:</span>
+            <span class="latency-big-number" id="latency-total-val">--</span>
+          </div>
+
+          <!-- Color Gauge Bar (0s -> 4s) -->
+          <div class="gauge-bar-container">
+            <div class="gauge-bar-track">
+              <div class="gauge-zone zone-green" style="width: 25%;"></div>
+              <div class="gauge-zone zone-yellow" style="width: 25%;"></div>
+              <div class="gauge-zone zone-orange" style="width: 25%;"></div>
+              <div class="gauge-zone zone-red" style="width: 25%;"></div>
+              <div class="gauge-needle" id="gauge-needle" style="left: 0%;"></div>
+            </div>
+            <div class="gauge-labels">
+              <span>0</span>
+              <span>1 sec</span>
+              <span>2 sec</span>
+              <span>3 sec</span>
+              <span>4 sec</span>
+            </div>
+          </div>
+          
+          <div class="latency-status-tag" id="latency-rating-tag">
+            <span class="dot"></span>
+            <span id="latency-rating-text">Awaiting Query...</span>
+          </div>
+        </div>
+
+        <!-- Detailed Stage Breakdown Accordion -->
+        <div class="latency-breakdown-list" id="latency-breakdown-list">
+          <div class="timing-chip" id="chip-stt" style="display: none;">
+            <span class="chip-name">🎙️ Audio STT:</span>
+            <span class="chip-val" id="time-stt">--</span>
+          </div>
+          <div class="timing-chip">
+            <span class="chip-name">🔍 BGE-M3 Encoding:</span>
+            <span class="chip-val" id="time-encoding">--</span>
+          </div>
+          <div class="timing-chip">
+            <span class="chip-name">⚡ FAISS Dense:</span>
+            <span class="chip-val" id="time-dense">--</span>
+          </div>
+          <div class="timing-chip">
+            <span class="chip-name">📊 Sparse Lexical:</span>
+            <span class="chip-val" id="time-sparse">--</span>
+          </div>
+          <div class="timing-chip">
+            <span class="chip-name">🗄️ SQLite Metadata:</span>
+            <span class="chip-val" id="time-metadata">--</span>
+          </div>
+          <div class="timing-chip">
+            <span class="chip-name">⚡ Time-To-First-Token:</span>
+            <span class="chip-val highlight" id="time-ttft">--</span>
+          </div>
+          <div class="timing-chip">
+            <span class="chip-name">🤖 Groq LLM:</span>
+            <span class="chip-val" id="time-llm">--</span>
+          </div>
+          <div class="timing-chip" id="chip-eval" style="display: none;">
+            <span class="chip-name">🎯 DeepEval:</span>
+            <span class="chip-val" id="time-eval">--</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live RAGAS Evaluation Card -->
+      <div class="sidebar-card eval-card" id="sidebar-eval-card">
+        <div class="card-header-row">
+          <div class="header-left">
+            <span class="card-title-icon">🎯</span>
+            <h2 class="card-title">DeepEval Quality Scorecard</h2>
+          </div>
+          <div class="eval-header-badges">
+            <span class="badge-status-golden" id="badge-golden-status" style="display: none;">
+              <span class="badge-dot"></span> Golden ✨
+            </span>
+            <span class="badge-status-open" id="badge-open-status" style="display: none;">
+              <span class="badge-dot"></span> Open Query
+            </span>
+          </div>
+        </div>
+
+        <div class="eval-empty-state" id="eval-empty-state">
+          <div class="empty-icon-circle">🎯</div>
+          <h3 class="empty-title">Automated DeepEval Evaluation</h3>
+          <p class="empty-desc">Check <strong>"Evaluation 🎯"</strong> in the bottom toolbar or pick a Golden Dataset query to see live quality scores & judge verdicts.</p>
+        </div>
+
+        <div class="eval-score-content" id="eval-score-content" style="display: none;">
+          <!-- Overall Composite Score Hero Card -->
+          <div class="overall-hero-card" id="overall-hero-card">
+            <div class="overall-score-dial">
+              <div class="score-ring-container">
+                <svg class="score-svg-ring" viewBox="0 0 64 64">
+                  <circle class="score-ring-bg" cx="32" cy="32" r="26"></circle>
+                  <circle class="score-ring-bar" id="score-ring-bar" cx="32" cy="32" r="26"></circle>
+                </svg>
+                <div class="score-ring-content">
+                  <span class="overall-score-val" id="eval-overall-score">--</span>
+                  <span class="overall-score-unit">/ 1.00</span>
+                </div>
+              </div>
+            </div>
+            <div class="overall-details">
+              <div class="quality-verdict-tag" id="eval-verdict-tag">
+                <span class="verdict-dot"></span>
+                <span id="eval-verdict-text">High Quality</span>
+              </div>
+              <div class="overall-meta-pills">
+                <div class="meta-pill">
+                  <span class="pill-label">Type:</span>
+                  <span class="pill-val" id="eval-query-type">ENTITY</span>
+                </div>
+                <div class="meta-pill">
+                  <span class="pill-label">ID:</span>
+                  <span class="pill-val" id="eval-query-id">#443967</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- DeepEval Metric Cards with Progress Meters -->
+          <div class="metric-section-title">Quality Metrics</div>
+          <div class="metric-progress-list">
+            <!-- Answer Correctness -->
+            <div class="metric-card">
+              <div class="metric-header">
+                <div class="metric-title-group">
+                  <span class="metric-icon">🎯</span>
+                  <span class="metric-name">Answer Correctness</span>
+                </div>
+                <span class="metric-score-badge badge-correctness" id="m-correctness">0.00</span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill fill-correctness" id="bar-correctness" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <!-- Faithfulness -->
+            <div class="metric-card">
+              <div class="metric-header">
+                <div class="metric-title-group">
+                  <span class="metric-icon">🛡️</span>
+                  <span class="metric-name">Faithfulness (Groundedness)</span>
+                </div>
+                <span class="metric-score-badge badge-faithfulness" id="m-faithfulness">0.00</span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill fill-faithfulness" id="bar-faithfulness" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <!-- Answer Relevance -->
+            <div class="metric-card">
+              <div class="metric-header">
+                <div class="metric-title-group">
+                  <span class="metric-icon">💬</span>
+                  <span class="metric-name">Answer Relevance</span>
+                </div>
+                <span class="metric-score-badge badge-relevance" id="m-relevance">0.00</span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill fill-relevance" id="bar-relevance" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <!-- Semantic Similarity -->
+            <div class="metric-card">
+              <div class="metric-header">
+                <div class="metric-title-group">
+                  <span class="metric-icon">🧠</span>
+                  <span class="metric-name">Semantic Similarity (BGE-M3)</span>
+                </div>
+                <span class="metric-score-badge badge-similarity" id="m-similarity">0.00</span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill fill-similarity" id="bar-similarity" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <!-- Context Recall -->
+            <div class="metric-card">
+              <div class="metric-header">
+                <div class="metric-title-group">
+                  <span class="metric-icon">📚</span>
+                  <span class="metric-name">Context Recall (Hit@K)</span>
+                </div>
+                <span class="metric-score-badge badge-recall" id="m-recall">0.00</span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill fill-recall" id="bar-recall" style="width: 0%;"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Ground Truth Reference Box (Prominent & Always Visible when Evaluated) -->
+          <div class="ground-truth-card" id="gt-box">
+            <div class="gt-card-header">
+              <div class="gt-title-group">
+                <span class="gt-icon">🎯</span>
+                <span class="gt-title">Ground Truth Answer</span>
+                <span class="gt-badge" id="gt-badge">Verified Target</span>
+              </div>
+              <div class="gt-actions">
+                <button class="gt-action-btn" id="gt-copy-btn" title="Copy Ground Truth" onclick="copyGroundTruth()">📋 Copy</button>
+                <button class="gt-action-btn" id="gt-speak-btn" title="Speak Ground Truth" onclick="speakGroundTruth()">🔊</button>
+              </div>
+            </div>
+            <div class="gt-card-body">
+              <p class="gt-text" id="gt-text">--</p>
+            </div>
+          </div>
+
+          <!-- LLM Judge Verdict Explanation Note -->
+          <div class="eval-explanation-box" id="eval-explanation-box">
+            <div class="exp-header">
+              <span class="exp-icon">⚖️</span>
+              <span class="exp-title">Judge Rationale</span>
+            </div>
+            <p class="exp-text" id="eval-explanation-text">--</p>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- History Modal Dialog -->
+  <div class="modal-backdrop" id="history-modal" style="display: none;" onclick="closeHistoryModal(event)">
+    <div class="modal-card" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h2>🕒 Query & Answer History</h2>
+        <button class="modal-close-btn" onclick="closeHistoryModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-history-list">
+        <!-- Filled by JS -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Application Logic -->
+  <script src="/static/app.js?v=3.2.0"></script>
+</body>
+</html>
