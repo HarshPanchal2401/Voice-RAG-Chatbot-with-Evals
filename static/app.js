@@ -20,7 +20,7 @@ const LANGUAGES = {
     appTitle: 'Gujarati Voice RAG',
     appSubtitle: 'Voice + Text RAG for Gujarati',
     samplePoolFile: '/static/golden_sample_queries.json',
-    thinkingText: 'વિચાર કરી રહ્યો છે... ⏳',
+    thinkingText: 'વિચાર કરી રહ્યો છે...',
     errPrefix: 'ક્ષમા કરશો, પ્રશ્નનો ઉત્તર મેળવવામાં સમસ્યા આવી'
   },
   hi: {
@@ -35,7 +35,7 @@ const LANGUAGES = {
     appTitle: 'Hindi Voice RAG',
     appSubtitle: 'Voice + Text RAG for Hindi',
     samplePoolFile: '/static/golden_sample_queries_hi.json',
-    thinkingText: 'विचार कर रहा हूँ... ⏳',
+    thinkingText: 'विचार कर रहा हूँ...',
     errPrefix: 'क्षमा करें, उत्तर प्राप्त करने में समस्या आई'
   }
 };
@@ -135,23 +135,31 @@ async function checkHealthStatus() {
 // Language Routing & UI Localization
 // ============================================================
 function toggleLanguageMenu(event) {
-  if (event) event.stopPropagation();
-  const dropdown = document.getElementById('top-lang-dropdown');
-  if (dropdown) {
-    dropdown.classList.toggle('open');
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
   }
+  const wrapper = document.getElementById('top-lang-dropdown');
+  const menu = document.getElementById('lang-dropdown-menu');
+  if (wrapper) wrapper.classList.toggle('open');
+  if (menu) menu.classList.toggle('show');
 }
 
 function selectLanguage(langCode, event) {
-  if (event) event.stopPropagation();
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
   if (!LANGUAGES[langCode]) return;
 
   const prevLang = STATE.currentLanguage;
   STATE.currentLanguage = langCode;
   localStorage.setItem('voice_rag_lang', langCode);
 
-  const dropdown = document.getElementById('top-lang-dropdown');
-  if (dropdown) dropdown.classList.remove('open');
+  const wrapper = document.getElementById('top-lang-dropdown');
+  const menu = document.getElementById('lang-dropdown-menu');
+  if (wrapper) wrapper.classList.remove('open');
+  if (menu) menu.classList.remove('show');
 
   applyLanguageUI(langCode, true);
 
@@ -159,6 +167,16 @@ function selectLanguage(langCode, event) {
     fetchSampleQueries();
   }
 }
+
+// Close language dropdown if user clicks anywhere outside
+document.addEventListener('click', (event) => {
+  const wrapper = document.getElementById('top-lang-dropdown');
+  const menu = document.getElementById('lang-dropdown-menu');
+  if (wrapper && !wrapper.contains(event.target)) {
+    wrapper.classList.remove('open');
+    if (menu) menu.classList.remove('show');
+  }
+});
 
 function applyLanguageUI(langCode, updateWelcomeIfSingle = false) {
   const info = LANGUAGES[langCode] || LANGUAGES.gu;
@@ -224,8 +242,10 @@ function applyLanguageUI(langCode, updateWelcomeIfSingle = false) {
 // ============================================================
 async function fetchSampleQueries() {
   const btn = document.getElementById('refresh-queries-btn');
+  const modalBtn = document.getElementById('modal-refresh-queries-btn');
   const countBadge = document.getElementById('sample-count');
   if (btn) btn.classList.add('spinning');
+  if (modalBtn) modalBtn.classList.add('spinning');
 
   const lang = STATE.currentLanguage || 'gu';
 
@@ -238,7 +258,9 @@ async function fetchSampleQueries() {
         currentGoldenQueries = data.queries;
         if (countBadge) countBadge.textContent = data.queries.length;
         renderSampleQueries(currentGoldenQueries);
+        applyModalFilters();
         if (btn) btn.classList.remove('spinning');
+        if (modalBtn) modalBtn.classList.remove('spinning');
         return;
       }
     }
@@ -262,11 +284,27 @@ async function fetchSampleQueries() {
       currentGoldenQueries = shuffled.slice(0, 20);
       if (countBadge) countBadge.textContent = currentGoldenQueries.length;
       renderSampleQueries(currentGoldenQueries);
+      applyModalFilters();
     }
   } catch (err2) {
     console.error("Could not load golden dataset queries fallback:", err2);
   } finally {
     if (btn) btn.classList.remove('spinning');
+    if (modalBtn) modalBtn.classList.remove('spinning');
+  }
+}
+
+async function refreshModalSampleQueries() {
+  const modalBtn = document.getElementById('modal-refresh-queries-btn');
+  const sidebarBtn = document.getElementById('refresh-queries-btn');
+  if (modalBtn) modalBtn.classList.add('spinning');
+  if (sidebarBtn) sidebarBtn.classList.add('spinning');
+
+  try {
+    await fetchSampleQueries();
+  } finally {
+    if (modalBtn) modalBtn.classList.remove('spinning');
+    if (sidebarBtn) sidebarBtn.classList.remove('spinning');
   }
 }
 
@@ -278,26 +316,207 @@ function renderSampleQueries(queries = null) {
   if (!list || list.length === 0) return;
 
   container.innerHTML = '';
-  list.forEach((itemObj, idx) => {
+  // Show top 3 preview items in the sidebar to keep it compact and clean
+  list.slice(0, 3).forEach((itemObj, idx) => {
     const qText = typeof itemObj === 'string' ? itemObj : itemObj.question;
-    const qType = itemObj.query_type ? `<span style="font-size:0.65rem; color:#64748b; margin-left:4px;">[${itemObj.query_type}]</span>` : '';
+    const qType = itemObj.query_type ? `<span class="sample-tag">${escapeHtml(itemObj.query_type)}</span>` : '';
     
     const item = document.createElement('div');
     item.className = 'sample-query-item';
+    item.title = "Click to load into input box";
     item.innerHTML = `
-      <span class="sample-num">${idx + 1}</span>
-      <span class="sample-text">${escapeHtml(qText)} ${qType}</span>
+      <span class="sample-text">${escapeHtml(qText)}</span>
+      ${qType}
     `;
     item.onclick = () => {
-      const input = document.getElementById('query-input');
-      if (input) {
-        input.value = qText;
-        handleInputResize(input);
-      }
-      submitTextQuery(qText, 'text');
+      useQueryInInput(qText);
     };
     container.appendChild(item);
   });
+}
+
+function fillRandomSampleQuery() {
+  const lang = STATE.currentLanguage || 'gu';
+  let pool = currentGoldenQueries;
+  if (!pool || pool.length === 0) {
+    pool = cachedGoldenPools[lang] || [];
+  }
+  if (!pool || pool.length === 0) return;
+
+  const randItem = pool[Math.floor(Math.random() * pool.length)];
+  const qText = typeof randItem === 'string' ? randItem : randItem.question;
+  useQueryInInput(qText);
+}
+
+function useQueryInInput(qText, autoSubmit = false) {
+  const input = document.getElementById('query-input');
+  if (!input) return;
+  input.value = qText;
+  handleInputResize(input);
+  input.focus();
+
+  // Subtle visual feedback pulse on dock container
+  const dockContainer = document.querySelector('.dock-container');
+  if (dockContainer) {
+    dockContainer.classList.remove('dock-loaded-pulse');
+    void dockContainer.offsetWidth; // Trigger reflow
+    dockContainer.classList.add('dock-loaded-pulse');
+    setTimeout(() => dockContainer.classList.remove('dock-loaded-pulse'), 800);
+  }
+
+  // Auto-scroll chat feed down if in chat mode
+  const feed = document.getElementById('chat-feed');
+  if (feed) {
+    feed.scrollTop = feed.scrollHeight;
+  }
+
+  if (autoSubmit) {
+    submitCurrentQuery();
+  }
+}
+
+function openAllQueriesModal() {
+  const modal = document.getElementById('all-queries-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  renderModalAllQueries(currentGoldenQueries);
+
+  const searchInput = document.getElementById('query-modal-search');
+  if (searchInput) {
+    searchInput.value = '';
+    setTimeout(() => searchInput.focus(), 50);
+  }
+}
+
+function closeAllQueriesModal(event) {
+  if (event && event.target && event.target.id !== 'all-queries-modal' && !event.target.classList.contains('modal-close-btn')) {
+    return;
+  }
+  const modal = document.getElementById('all-queries-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+let currentModalFilterCat = 'all';
+
+function getTypeBadgeClass(qType) {
+  const t = (qType || '').toUpperCase();
+  if (t.includes('DESC')) return 'tag-desc';
+  if (t.includes('ENT')) return 'tag-entity';
+  if (t.includes('FACT')) return 'tag-fact';
+  if (t.includes('NUM')) return 'tag-numeric';
+  if (t.includes('LOC')) return 'tag-location';
+  return 'tag-default';
+}
+
+function handleModalSearchInput() {
+  applyModalFilters();
+}
+
+function filterModalByCategory(cat) {
+  currentModalFilterCat = cat;
+  document.querySelectorAll('.cat-filter-btn').forEach(btn => {
+    if (btn.dataset.cat === cat) {
+      btn.classList.add('active');
+    } else {
+      btn.classList.remove('active');
+    }
+  });
+  applyModalFilters();
+}
+
+function applyModalFilters() {
+  const searchInput = document.getElementById('query-modal-search');
+  const term = searchInput ? searchInput.value.toLowerCase().trim() : '';
+
+  const filtered = currentGoldenQueries.filter(itemObj => {
+    const qText = (typeof itemObj === 'string' ? itemObj : itemObj.question) || '';
+    const qType = ((typeof itemObj === 'object' ? itemObj.query_type : '') || '').toLowerCase();
+
+    // 1. Check category filter
+    if (currentModalFilterCat !== 'all') {
+      if (!qType.includes(currentModalFilterCat)) return false;
+    }
+
+    // 2. Check search text
+    if (term) {
+      return qText.toLowerCase().includes(term) || qType.includes(term);
+    }
+    return true;
+  });
+
+  renderModalAllQueries(filtered);
+}
+
+function renderModalAllQueries(queriesToRender) {
+  const container = document.getElementById('modal-all-queries-list');
+  const countBadge = document.getElementById('modal-queries-count');
+  if (!container) return;
+
+  const list = queriesToRender || currentGoldenQueries;
+  if (countBadge) countBadge.textContent = list.length;
+
+  if (!list || list.length === 0) {
+    container.innerHTML = '<div class="empty-state-text" style="padding: 32px; text-align: center; grid-column: 1 / -1;">No questions match your filter.</div>';
+    return;
+  }
+
+  container.innerHTML = '';
+  list.forEach((itemObj, idx) => {
+    const qText = typeof itemObj === 'string' ? itemObj : itemObj.question;
+    const qType = itemObj.query_type || 'QUESTION';
+    const badgeClass = getTypeBadgeClass(qType);
+
+    const card = document.createElement('div');
+    card.className = 'modal-query-card';
+    card.title = "Click anywhere to fill this prompt into input box";
+    card.innerHTML = `
+      <div class="query-card-header">
+        <span class="query-type-tag ${badgeClass}">${escapeHtml(qType)}</span>
+        <span class="query-index">#${idx + 1}</span>
+      </div>
+      <div class="query-card-text">${escapeHtml(qText)}</div>
+      <div class="query-card-footer">
+        <button class="btn-use-query" title="Fill into input box">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+          </svg>
+          <span>Fill Input</span>
+        </button>
+        <button class="btn-ask-query" title="Submit question immediately">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+          <span>Ask</span>
+        </button>
+      </div>
+    `;
+
+    // Click on card body -> fill query in input box & close modal
+    card.onclick = (e) => {
+      if (e.target.closest('.btn-ask-query')) return;
+      useQueryInInput(qText, false);
+      const modal = document.getElementById('all-queries-modal');
+      if (modal) modal.style.display = 'none';
+    };
+
+    // "Ask" button -> submit immediately
+    const askBtn = card.querySelector('.btn-ask-query');
+    if (askBtn) {
+      askBtn.onclick = (e) => {
+        e.stopPropagation();
+        const modal = document.getElementById('all-queries-modal');
+        if (modal) modal.style.display = 'none';
+        useQueryInInput(qText, true);
+      };
+    }
+
+    container.appendChild(card);
+  });
+}
+
+function filterModalQueries(keyword) {
+  handleModalSearchInput();
 }
 
 function renderHistoryList() {
@@ -392,7 +611,7 @@ function switchMode(mode) {
 function handleInputResize(textarea) {
   if (!textarea) return;
   textarea.style.height = 'auto';
-  textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+  textarea.style.height = Math.max(42, Math.min(textarea.scrollHeight, 150)) + 'px';
   const counter = document.getElementById('char-counter');
   if (counter) {
     counter.textContent = `${textarea.value.length} / 1000`;
@@ -411,13 +630,15 @@ function handleEvalToggleChange(checkbox) {
   const textEl = document.getElementById('eval-toggle-text');
   const labelEl = document.getElementById('eval-toggle-label');
   if (textEl) {
-    textEl.textContent = checkbox.checked ? 'Eval: ON 🎯' : 'Eval: OFF 🎯';
+    textEl.textContent = checkbox.checked ? 'Eval: ON' : 'Eval: OFF';
   }
   if (labelEl) {
     if (checkbox.checked) {
-      labelEl.title = "Evaluation is ENABLED - DeepEval quality metrics will run on each query";
+      labelEl.classList.add('active');
+      labelEl.title = "Evaluation is ENABLED — DeepEval quality metrics will run on each query";
     } else {
-      labelEl.title = "Evaluation is DISABLED - Responses will generate at maximum speed";
+      labelEl.classList.remove('active');
+      labelEl.title = "Evaluation is DISABLED — Responses will generate at maximum speed";
     }
   }
 }
@@ -427,13 +648,15 @@ function handleTtsToggleChange(checkbox) {
   const textEl = document.getElementById('tts-toggle-text');
   const labelEl = document.getElementById('tts-toggle-label');
   if (textEl) {
-    textEl.textContent = checkbox.checked ? 'Voice Reply: ON 🔊' : 'Voice Reply: OFF 🔇';
+    textEl.textContent = checkbox.checked ? 'Voice Reply: ON' : 'Voice Reply: OFF';
   }
   if (labelEl) {
     if (checkbox.checked) {
-      labelEl.title = "Voice Speech Reply is ENABLED - Sarvam Bulbul v3 will speak the response";
+      labelEl.classList.add('active');
+      labelEl.title = "Voice Speech Reply is ENABLED — Sarvam Bulbul v3 will speak the response";
     } else {
-      labelEl.title = "Voice Speech Reply is DISABLED - Text response only";
+      labelEl.classList.remove('active');
+      labelEl.title = "Voice Speech Reply is DISABLED — Text response only";
     }
   }
 }
@@ -982,8 +1205,13 @@ function initWaveformCanvas() {
   const h = canvas.height;
 
   ctx.clearRect(0, 0, w, h);
-  ctx.strokeStyle = '#93c5fd';
+  const grad = ctx.createLinearGradient(0, 0, w, 0);
+  grad.addColorStop(0, 'rgba(99, 102, 241, 0.4)');
+  grad.addColorStop(0.5, 'rgba(6, 182, 212, 0.7)');
+  grad.addColorStop(1, 'rgba(139, 92, 246, 0.4)');
+  ctx.strokeStyle = grad;
   ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
   ctx.beginPath();
 
   const numBars = 45;
@@ -992,7 +1220,7 @@ function initWaveformCanvas() {
   for (let i = 0; i < numBars; i++) {
     const x = i * barWidth + barWidth / 2;
     const heightFactor = Math.sin((i / numBars) * Math.PI) * 0.7 + 0.15;
-    const barH = 15 * heightFactor;
+    const barH = 18 * heightFactor;
     ctx.moveTo(x, h / 2 - barH / 2);
     ctx.lineTo(x, h / 2 + barH / 2);
   }
@@ -1025,7 +1253,8 @@ function drawLiveWaveform() {
 
     const grad = ctx.createLinearGradient(0, h / 2 - barH / 2, 0, h / 2 + barH / 2);
     grad.addColorStop(0, '#06b6d4');
-    grad.addColorStop(1, '#2563eb');
+    grad.addColorStop(0.5, '#6366f1');
+    grad.addColorStop(1, '#ec4899');
 
     ctx.strokeStyle = grad;
     ctx.lineWidth = 3;
@@ -1068,7 +1297,7 @@ function appendBotLoadingMessage(timeStr, thinkingText = 'Thinking... ⏳') {
   const row = document.createElement('div');
   row.className = 'message-row bot-row';
   row.innerHTML = `
-    <div class="message-avatar">🤖</div>
+    <div class="message-avatar">✦</div>
     <div class="message-bubble">
       <div class="message-header">
         <span class="message-sender">Answer</span>
@@ -1481,6 +1710,31 @@ function toggleTheme() {
   if (icon) icon.textContent = isDark ? '🌙' : '☀️';
 }
 
+function startNewSession() {
+  const feed = document.getElementById('chat-feed');
+  if (feed) {
+    feed.innerHTML = '';
+    const activeLang = STATE.currentLanguage || 'gu';
+    const langInfo = LANGUAGES[activeLang] || LANGUAGES.gu;
+    appendBotMessage({
+      answer: langInfo.welcomeMsg,
+      timestamp: formatTime(new Date()),
+      sources: []
+    });
+  }
+}
+
+function toggleTelemetryPanel() {
+  const layout = document.querySelector('.app-layout');
+  const panel = document.getElementById('telemetry-panel');
+  if (layout) {
+    layout.classList.toggle('inspector-collapsed');
+  }
+  if (panel) {
+    panel.classList.toggle('open');
+  }
+}
+
 // ============================================================
 // Global Window Binding for Inline HTML Handlers
 // ============================================================
@@ -1493,12 +1747,23 @@ window.handleAudioFileUpload = handleAudioFileUpload;
 window.handleInputResize = handleInputResize;
 window.handleInputKeyDown = handleInputKeyDown;
 window.toggleTheme = toggleTheme;
+window.startNewSession = startNewSession;
+window.toggleTelemetryPanel = toggleTelemetryPanel;
 window.openHistoryModal = openHistoryModal;
+window.closeHistoryModal = closeHistoryModal;
 window.clearHistory = clearHistory;
 window.toggleSourcesDrawer = toggleSourcesDrawer;
 window.copyTextToClipboard = copyTextToClipboard;
 window.speakText = speakText;
 window.fetchSampleQueries = fetchSampleQueries;
+window.refreshModalSampleQueries = refreshModalSampleQueries;
+window.fillRandomSampleQuery = fillRandomSampleQuery;
+window.openAllQueriesModal = openAllQueriesModal;
+window.closeAllQueriesModal = closeAllQueriesModal;
+window.filterModalQueries = filterModalQueries;
+window.filterModalByCategory = filterModalByCategory;
+window.handleModalSearchInput = handleModalSearchInput;
+window.useQueryInInput = useQueryInInput;
 window.toggleLanguageMenu = toggleLanguageMenu;
 window.selectLanguage = selectLanguage;
 window.copyGroundTruth = copyGroundTruth;
