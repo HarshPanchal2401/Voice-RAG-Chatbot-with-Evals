@@ -31,7 +31,17 @@ class RAGResponse(BaseModel):
     sources: List[SourceDocument] = Field(..., description="List of top retrieved source documents.")
     latency: LatencyBreakdown = Field(..., description="Comprehensive stage-by-stage latency analysis in ms.")
     evaluation: Optional[EvaluationResult] = Field(None, description="DeepEval evaluation results and quality metrics.")
+    audio_base64: Optional[str] = Field(None, description="Base64-encoded MP3 audio of the answer (when voice_reply is enabled).")
     trace_id: Optional[str] = Field(None, description="LangSmith trace id of this request (when tracing is enabled).")
+
+
+class TTSResponse(BaseModel):
+    status: str = Field("success", description="TTS response status.")
+    language: str = Field(..., description="TTS language code.")
+    speaker: str = Field("shubh", description="Voice speaker used.")
+    audio_base64: str = Field(..., description="Base64-encoded MP3 audio.")
+    tts_ms: float = Field(..., description="TTS synthesis latency in ms.")
+
 
 
 class RetrievalResponse(BaseModel):

@@ -24,6 +24,7 @@ class LatencyBreakdown(BaseModel):
     ttft_ms: Optional[float] = Field(None, description="Time to first token in ms (for streaming responses).")
     llm_ms: float = Field(..., description="Groq LLM generation time in ms.")
     eval_ms: Optional[float] = Field(None, description="DeepEval evaluation latency in ms.")
+    tts_ms: Optional[float] = Field(None, description="Audio text-to-speech synthesis latency in ms (if voice reply).")
     total_ms: float = Field(..., description="Total end-to-end processing latency in ms.")
 
 

@@ -189,7 +189,7 @@ def main():
 
     show_sources = True
     streaming_mode = True
-    eval_mode = True
+    eval_mode = False
 
     while True:
         try:

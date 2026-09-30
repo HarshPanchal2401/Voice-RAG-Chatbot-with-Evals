@@ -4,6 +4,7 @@ Query Routes (Text & Voice)
 Primary endpoints for synchronous Text & Voice RAG execution.
 """
 
+import base64
 from typing import Optional
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from starlette.concurrency import run_in_threadpool
@@ -14,8 +15,8 @@ from pipeline.single_pipeline import SingleLanguagePipeline
 from services.voice_service import VoiceService
 from api.dependencies import get_router, get_voice_service
 from api.helpers import format_sources, format_evaluation, build_latency, run_evaluation
-from schemas.requests import TextQueryRequest
-from schemas.responses import RAGResponse
+from schemas.requests import TextQueryRequest, TTSRequest
+from schemas.responses import RAGResponse, TTSResponse
 
 router = APIRouter()
 
@@ -110,7 +111,8 @@ def handle_voice_query(
 @router.post("/api/v1/ask", response_model=RAGResponse, tags=["Query"])
 async def query_by_text(
     payload: TextQueryRequest,
-    router_instance: LanguageRouter = Depends(get_router)
+    router_instance: LanguageRouter = Depends(get_router),
+    voice_service: VoiceService = Depends(get_voice_service)
 ):
     """
     Primary Text RAG Endpoint:
@@ -119,6 +121,7 @@ async def query_by_text(
     3. Multi-strategy sorting & optional listwise re-ranking.
     4. Groq LLM answer generation in target language.
     5. Latency profiling & optional DeepEval scoring.
+    6. Optional Sarvam Bulbul v3 TTS voice reply.
     """
     query = payload.query.strip()
     if not query:
@@ -143,6 +146,20 @@ async def query_by_text(
         payload.sort_by,
     )
 
+    audio_base64, tts_ms = (None, None)
+    if payload.voice_reply:
+        audio_bytes, tts_ms = await run_in_threadpool(
+            voice_service.generate_tts_audio,
+            result["answer"],
+            target_lang,
+            "shubh",
+            1.0,
+            22050,
+            "bulbul:v3"
+        )
+        if audio_bytes:
+            audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+
     return RAGResponse(
         status="success",
         mode="text",
@@ -151,8 +168,9 @@ async def query_by_text(
         transcription=None,
         answer=result["answer"],
         sources=format_sources(result["documents"], lang=target_lang),
-        latency=build_latency(result, eval_ms=result.get("eval_ms")),
+        latency=build_latency(result, eval_ms=result.get("eval_ms"), tts_ms=tts_ms),
         evaluation=format_evaluation(result.get("evaluation")),
+        audio_base64=audio_base64,
         trace_id=result.get("trace_id"),
     )
 
@@ -166,6 +184,7 @@ async def query_by_voice(
     sort_by: str = Form(default="rrf"),
     auto_detect_language: bool = Form(default=True),
     evaluate: bool = Form(default=False),
+    voice_reply: bool = Form(default=True, description="Whether to reply in voice via Sarvam Bulbul v3"),
     query_id: Optional[int] = Form(default=None),
     router_instance: LanguageRouter = Depends(get_router),
     voice_service: VoiceService = Depends(get_voice_service)
@@ -176,7 +195,8 @@ async def query_by_voice(
     2. Smart auto-routing based on transcribed text script.
     3. Hybrid RAG retrieval + sorting + optional re-ranking.
     4. LLM answer generation in detected language.
-    5. Comprehensive latency breakdown: STT + Retrieval + LLM + Eval + Total.
+    5. Sarvam Bulbul v3 voice synthesis response.
+    6. Comprehensive latency breakdown: STT + Retrieval + LLM + Eval + TTS + Total.
     """
     audio_bytes = await file.read()
     if not audio_bytes:
@@ -218,6 +238,20 @@ async def query_by_voice(
             )
             result.update(rerun_result)
 
+    audio_base64, tts_ms = (None, None)
+    if voice_reply:
+        speech_bytes, tts_ms = await run_in_threadpool(
+            voice_service.generate_tts_audio,
+            result["answer"],
+            target_lang,
+            "shubh",
+            1.0,
+            22050,
+            "bulbul:v3"
+        )
+        if speech_bytes:
+            audio_base64 = base64.b64encode(speech_bytes).decode("utf-8")
+
     return RAGResponse(
         status="success",
         mode="voice",
@@ -226,7 +260,47 @@ async def query_by_voice(
         transcription=result["transcription"],
         answer=result["answer"],
         sources=format_sources(result["documents"], lang=target_lang),
-        latency=build_latency(result, stt_ms=result.get("stt_ms"), eval_ms=result.get("eval_ms")),
+        latency=build_latency(result, stt_ms=result.get("stt_ms"), eval_ms=result.get("eval_ms"), tts_ms=tts_ms),
         evaluation=format_evaluation(result.get("evaluation")),
+        audio_base64=audio_base64,
         trace_id=result.get("trace_id"),
     )
+
+
+@router.post("/api/v1/voice/tts", response_model=TTSResponse, tags=["Voice"])
+async def convert_text_to_speech(
+    payload: TTSRequest,
+    voice_service: VoiceService = Depends(get_voice_service)
+):
+    """
+    On-Demand Text-to-Speech Endpoint:
+    Synthesizes speech audio from any text in Gujarati or Hindi using Sarvam AI bulbul:v3.
+    """
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+
+    audio_bytes, tts_ms = await run_in_threadpool(
+        voice_service.generate_tts_audio,
+        text,
+        payload.language or "gu",
+        payload.speaker or "shubh",
+        payload.pace or 1.0,
+        22050,
+        "bulbul:v3"
+    )
+
+    if not audio_bytes:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not synthesize speech audio. Please verify SARVAM_API_KEY."
+        )
+
+    return TTSResponse(
+        status="success",
+        language=payload.language or "gu",
+        speaker=payload.speaker or "shubh",
+        audio_base64=base64.b64encode(audio_bytes).decode("utf-8"),
+        tts_ms=round(tts_ms, 2)
+    )
+

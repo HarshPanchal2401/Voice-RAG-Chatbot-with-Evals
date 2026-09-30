@@ -70,6 +70,7 @@ class NativeBGEM3:
             self.tokenizer.unk_token_id,
         ]
         self._special_ids = np.array([t for t in _special if t is not None], dtype=np.int64)
+        self._query_cache: Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
     def _forward(self, sentences: List[str], max_length: int):
         inputs = self.tokenizer(
@@ -87,7 +88,7 @@ class NativeBGEM3:
         self,
         sentences,
         batch_size: int = 1,
-        max_length: int = 128,
+        max_length: int = 48,
         return_dense: bool = True,
         return_sparse: bool = True,
         return_colbert_vecs: bool = False,
@@ -127,8 +128,12 @@ class NativeBGEM3:
         uniq, starts = np.unique(ids, return_index=True)
         return uniq, np.maximum.reduceat(weights, starts).astype(np.float32)
 
-    def encode_hybrid(self, text: str, max_length: int = 128) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Single-query fast path: (dense (1, D) float32, sparse token ids, sparse weights)."""
+    def encode_hybrid(self, text: str, max_length: int = 48) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Single-query fast path with in-memory bounded LRU cache (1 MB max)."""
+        cache_key = (text.strip(), max_length)
+        if cache_key in self._query_cache:
+            return self._query_cache[cache_key]
+
         inputs, hidden = self._forward([text], max_length)
         with torch.inference_mode():
             dense = torch.nn.functional.normalize(hidden[:, 0], p=2, dim=-1).float().cpu().numpy()
@@ -136,7 +141,13 @@ class NativeBGEM3:
         ids = inputs["input_ids"].cpu().numpy()[0]
         mask = inputs["attention_mask"].cpu().numpy()[0].astype(bool)
         tok_ids, tok_w = self._sparse_arrays(ids, raw, mask)
-        return np.ascontiguousarray(dense, dtype=np.float32), tok_ids, tok_w
+        res = (np.ascontiguousarray(dense, dtype=np.float32), tok_ids, tok_w)
+
+        # Evict oldest entry if cache exceeds 256 entries (~1 MB RAM max)
+        if len(self._query_cache) >= 256:
+            self._query_cache.pop(next(iter(self._query_cache)))
+        self._query_cache[cache_key] = res
+        return res
 
     def encode_query(self, query: str, max_length: int = 256):
         res = self.encode(query, max_length=max_length, return_dense=True, return_sparse=False)

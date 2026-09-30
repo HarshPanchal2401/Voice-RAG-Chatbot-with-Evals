@@ -151,3 +151,72 @@ class VoiceService:
             response_format="json"
         )
         return getattr(transcription, "text", "").strip()
+
+    @staticmethod
+    def _clean_text_for_speech(text: str) -> str:
+        """Removes markdown tags, headers, and reference brackets for smooth voice synthesis."""
+        import re
+        if not text:
+            return ""
+        # Remove citation references like [સંદર્ભ 1], [संदर्भ 2], [Doc 1], [1]
+        text = re.sub(r'\[(?:સંદર્ભ|संदर्भ|Doc|Chunk|\d+)[^\]]*\]', '', text)
+        # Remove markdown bold/italics
+        text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)
+        # Remove markdown headers
+        text = re.sub(r'#+\s*', '', text)
+        # Remove URLs
+        text = re.sub(r'https?://\S+', '', text)
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    @traceable(run_type="tool", name="text_to_speech")
+    def generate_tts_audio(
+        self,
+        text: str,
+        language: str = "gu",
+        speaker: str = "shubh",
+        pace: float = 1.0,
+        speech_sample_rate: int = 22050,
+        model: str = "bulbul:v3"
+    ) -> Tuple[Optional[bytes], float]:
+        """
+        Synthesizes speech audio from text using Sarvam AI bulbul:v3.
+        Supports Gujarati ('gu-IN') and Hindi ('hi-IN').
+        Returns: (audio_mp3_bytes, tts_latency_ms)
+        """
+        if not text or not text.strip() or not self.sarvam_api_key:
+            return None, 0.0
+
+        t0 = time.perf_counter()
+        lang_info = self._resolve_lang(language)
+        lang_code = lang_info["sarvam"]  # 'gu-IN' or 'hi-IN'
+
+        clean_text = self._clean_text_for_speech(text)
+        if not clean_text:
+            return None, 0.0
+
+        # Limit to 500 characters to keep latency fast for voice conversation
+        if len(clean_text) > 500:
+            clean_text = clean_text[:500].rsplit(".", 1)[0] + "."
+
+        try:
+            from sarvamai import SarvamAI
+            client = SarvamAI(api_subscription_key=self.sarvam_api_key)
+            chunks = list(client.text_to_speech.convert_stream(
+                text=clean_text,
+                language_code=lang_code,
+                speaker=speaker,
+                model=model,
+                pace=pace,
+                speech_sample_rate=speech_sample_rate,
+                output_audio_codec="mp3"
+            ))
+            audio_bytes = b"".join(chunks)
+            tts_ms = (time.perf_counter() - t0) * 1000
+            add_run_metadata(tts_model=model, tts_lang=lang_code, tts_ms=round(tts_ms, 2))
+            return audio_bytes, tts_ms
+        except Exception as e:
+            print(f"⚠️ [VoiceService] Sarvam TTS error ({lang_code}, {model}): {e}")
+            return None, 0.0
+

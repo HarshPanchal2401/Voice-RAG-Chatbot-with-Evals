@@ -37,7 +37,7 @@ def get_default_torch_threads() -> int:
     env = os.environ.get("RAG_TORCH_THREADS")
     if env:
         return max(1, int(env))
-    return max(1, (os.cpu_count() or 2) // 2)
+    return max(1, os.cpu_count() or 4)
 
 # Models
 BGE_MODEL_NAME = os.environ.get("RAG_EMBEDDING_MODEL", "BAAI/bge-m3")
@@ -49,14 +49,14 @@ DEFAULT_JUDGE_MODEL = os.environ.get("RAG_JUDGE_MODEL", "openai/gpt-oss-120b")
 LLM_MAX_TOKENS = int(os.environ.get("RAG_LLM_MAX_TOKENS", "512"))
 LLM_TEMPERATURE = 0.0
 
-# Retrieval Hyperparameters
-BGE_QUERY_MAX_LENGTH = int(os.environ.get("RAG_MAX_QUERY_LEN", "128"))
+# Retrieval Hyperparameters (Optimized for Low-Memory CPU)
+BGE_QUERY_MAX_LENGTH = int(os.environ.get("RAG_MAX_QUERY_LEN", "48"))
 DENSE_TOP_N = int(os.environ.get("RAG_DENSE_TOP_N", "50"))
 SPARSE_TOP_N = int(os.environ.get("RAG_SPARSE_TOP_N", "50"))
 RRF_TOP_N = int(os.environ.get("RAG_RRF_TOP_N", "30"))
 RRF_K = int(os.environ.get("RAG_RRF_K", "60"))
 FINAL_TOP_K = int(os.environ.get("RAG_FINAL_TOP_K", "5"))
-DEFAULT_HNSW_EF_SEARCH = int(os.environ.get("RAG_HNSW_EF_SEARCH", "64"))
+DEFAULT_HNSW_EF_SEARCH = int(os.environ.get("RAG_HNSW_EF_SEARCH", "24"))
 
 # Multilingual Language Metadata
 LANGUAGE_METADATA = {

@@ -77,7 +77,8 @@ def format_evaluation(eval_raw: Optional[dict]) -> Optional[EvaluationResult]:
 def build_latency(
     rag_result: dict,
     stt_ms: Optional[float] = None,
-    eval_ms: Optional[float] = None
+    eval_ms: Optional[float] = None,
+    tts_ms: Optional[float] = None
 ) -> LatencyBreakdown:
     """Builds comprehensive LatencyBreakdown model."""
     retrieval_timings = rag_result.get("retrieval_timings") or rag_result.get("timings") or {}
@@ -87,8 +88,10 @@ def build_latency(
         ttft_ms=rag_result.get("ttft_ms"),
         llm_ms=rag_result.get("llm_ms", 0.0),
         eval_ms=eval_ms,
-        total_ms=(stt_ms or 0.0) + rag_result.get("total_ms", 0.0),
+        tts_ms=tts_ms,
+        total_ms=(stt_ms or 0.0) + rag_result.get("total_ms", 0.0) + (tts_ms or 0.0),
     )
+
 
 
 def run_evaluation(

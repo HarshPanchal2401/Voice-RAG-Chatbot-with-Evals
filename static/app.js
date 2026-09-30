@@ -93,6 +93,20 @@ function initApp() {
       sources: []
     });
   }
+
+  // Ensure evaluation toggle is off by default
+  const evalToggle = document.getElementById('eval-toggle');
+  if (evalToggle) {
+    evalToggle.checked = false;
+    handleEvalToggleChange(evalToggle);
+  }
+
+  // Ensure TTS voice reply toggle is off by default
+  const ttsToggle = document.getElementById('tts-toggle');
+  if (ttsToggle) {
+    ttsToggle.checked = false;
+    handleTtsToggleChange(ttsToggle);
+  }
 }
 
 if (document.readyState === 'loading') {
@@ -276,8 +290,6 @@ function renderSampleQueries(queries = null) {
     `;
     item.onclick = () => {
       const input = document.getElementById('query-input');
-      const evalToggle = document.getElementById('eval-toggle');
-      if (evalToggle) evalToggle.checked = true;
       if (input) {
         input.value = qText;
         handleInputResize(input);
@@ -394,6 +406,88 @@ function handleInputKeyDown(e) {
   }
 }
 
+function handleEvalToggleChange(checkbox) {
+  if (!checkbox) return;
+  const textEl = document.getElementById('eval-toggle-text');
+  const labelEl = document.getElementById('eval-toggle-label');
+  if (textEl) {
+    textEl.textContent = checkbox.checked ? 'Eval: ON 🎯' : 'Eval: OFF 🎯';
+  }
+  if (labelEl) {
+    if (checkbox.checked) {
+      labelEl.title = "Evaluation is ENABLED - DeepEval quality metrics will run on each query";
+    } else {
+      labelEl.title = "Evaluation is DISABLED - Responses will generate at maximum speed";
+    }
+  }
+}
+
+function handleTtsToggleChange(checkbox) {
+  if (!checkbox) return;
+  const textEl = document.getElementById('tts-toggle-text');
+  const labelEl = document.getElementById('tts-toggle-label');
+  if (textEl) {
+    textEl.textContent = checkbox.checked ? 'Voice Reply: ON 🔊' : 'Voice Reply: OFF 🔇';
+  }
+  if (labelEl) {
+    if (checkbox.checked) {
+      labelEl.title = "Voice Speech Reply is ENABLED - Sarvam Bulbul v3 will speak the response";
+    } else {
+      labelEl.title = "Voice Speech Reply is DISABLED - Text response only";
+    }
+  }
+}
+
+let currentPlayingAudio = null;
+
+function playAudioBase64(b64Data) {
+  if (!b64Data) return;
+  try {
+    if (currentPlayingAudio) {
+      currentPlayingAudio.pause();
+      currentPlayingAudio = null;
+    }
+    const audio = new Audio("data:audio/mp3;base64," + b64Data);
+    currentPlayingAudio = audio;
+    audio.play().catch(err => {
+      console.warn("Audio autoplay blocked by browser policy:", err);
+    });
+  } catch (err) {
+    console.error("Audio playback error:", err);
+  }
+}
+
+async function synthesizeAndPlayMessage(btn) {
+  const text = btn.getAttribute('data-text');
+  if (!text) return;
+  const originalHtml = btn.innerHTML;
+  btn.innerHTML = '⏳ Speaking...';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/v1/voice/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: text,
+        language: STATE.currentLanguage || 'gu',
+        speaker: 'shubh'
+      })
+    });
+    if (!res.ok) throw new Error("TTS failed");
+    const data = await res.json();
+    if (data.audio_base64) {
+      playAudioBase64(data.audio_base64);
+      btn.innerHTML = '🔊 Replay';
+      btn.onclick = () => playAudioBase64(data.audio_base64);
+    }
+  } catch (err) {
+    console.error("On-demand TTS error:", err);
+    btn.innerHTML = '⚠️ Voice Error';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function submitCurrentQuery() {
   const input = document.getElementById('query-input');
   if (!input) return;
@@ -411,6 +505,8 @@ async function submitTextQuery(query, mode = 'text', sttLatencyMs = null) {
 
   const evalToggle = document.getElementById('eval-toggle');
   const evaluate = evalToggle ? evalToggle.checked : false;
+  const ttsToggle = document.getElementById('tts-toggle');
+  const voiceReply = mode === 'voice' ? true : (ttsToggle ? ttsToggle.checked : false);
   const timeStr = formatTime(new Date());
   const activeLang = STATE.currentLanguage || 'gu';
   const langInfo = LANGUAGES[activeLang] || LANGUAGES.gu;
@@ -421,37 +517,131 @@ async function submitTextQuery(query, mode = 'text', sttLatencyMs = null) {
 
   // 2. Append Bot Bubble with Typing Loader
   const botBubble = appendBotLoadingMessage(timeStr, langInfo.thinkingText);
+  const feed = document.getElementById('chat-feed');
+
+  let streamedAnswer = '';
+  let lastAnswerMsg = null;
+  let receivedAudioB64 = null;
 
   try {
-    const res = await fetch('/api/v1/query/text', {
+    const response = await fetch('/api/v1/query/text/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         query: query,
         language: activeLang,
         top_k: 5,
-        evaluate: evaluate
+        evaluate: evaluate,
+        voice_reply: voiceReply
       })
     });
 
-    if (!res.ok) {
-      throw new Error(`Server returned status ${res.status}`);
+    if (!response.ok) {
+      throw new Error(`Server returned status ${response.status}`);
     }
 
-    const data = await res.json();
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
 
-    if (sttLatencyMs && data.latency) {
-      data.latency.stt_ms = sttLatencyMs;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const block of parts) {
+        if (!block.trim()) continue;
+        const lines = block.split('\n');
+        let eventType = 'message';
+        let dataStr = '';
+
+        for (const line of lines) {
+          if (line.startsWith('event:')) {
+            eventType = line.slice(6).trim();
+          } else if (line.startsWith('data:')) {
+            dataStr += (dataStr ? '\n' : '') + line.slice(5).trim();
+          }
+        }
+
+        if (!dataStr) continue;
+
+        try {
+          const data = JSON.parse(dataStr);
+
+          // ⚡ Real-Time Streamed Token
+          if (eventType === 'token') {
+            const token = data.token || '';
+            streamedAnswer += token;
+            const body = botBubble ? botBubble.querySelector('.bot-body-text') : null;
+            if (body) {
+              body.textContent = streamedAnswer;
+              if (feed) feed.scrollTop = feed.scrollHeight;
+            }
+          }
+          // 🤖 Full Answer Meta & References
+          else if (eventType === 'meta') {
+            lastAnswerMsg = data;
+            if (sttLatencyMs && lastAnswerMsg.latency) {
+              lastAnswerMsg.latency.stt_ms = sttLatencyMs;
+            }
+            updateBotMessage(
+              botBubble,
+              data.answer || streamedAnswer,
+              data.sources || [],
+              timeStr,
+              data.evaluation || null,
+              receivedAudioB64
+            );
+            updateLatencySidebar(lastAnswerMsg.latency);
+          }
+          // 🔊 TTS Voice Audio (Sarvam Bulbul v3)
+          else if (eventType === 'tts') {
+            if (data.audio_base64) {
+              receivedAudioB64 = data.audio_base64;
+              playAudioBase64(data.audio_base64);
+              if (botBubble && lastAnswerMsg) {
+                updateBotMessage(
+                  botBubble,
+                  lastAnswerMsg.answer || streamedAnswer,
+                  lastAnswerMsg.sources || [],
+                  timeStr,
+                  lastAnswerMsg.evaluation || null,
+                  receivedAudioB64
+                );
+              }
+            }
+          }
+          // 🎯 DeepEval Evaluation Scorecard
+          else if (eventType === 'evaluation') {
+            if (lastAnswerMsg) {
+              lastAnswerMsg.evaluation = data.evaluation;
+              if (lastAnswerMsg.latency && data.eval_ms) {
+                lastAnswerMsg.latency.eval_ms = data.eval_ms;
+                updateLatencySidebar(lastAnswerMsg.latency);
+              }
+            }
+            updateBotMessage(
+              botBubble,
+              lastAnswerMsg ? lastAnswerMsg.answer : streamedAnswer,
+              lastAnswerMsg ? lastAnswerMsg.sources : [],
+              timeStr,
+              data.evaluation,
+              receivedAudioB64
+            );
+            updateEvaluationSidebar(data.evaluation);
+          }
+          // ⚠️ Server Error Event
+          else if (eventType === 'error') {
+            throw new Error(data.error || 'Streaming error');
+          }
+        } catch (jsonErr) {
+          console.warn("SSE JSON chunk parse error:", jsonErr, dataStr);
+        }
+      }
     }
-
-    // 3. Update Bot Bubble with Final Content & DeepEval Score Badge
-    updateBotMessage(botBubble, data.answer, data.sources, timeStr, data.evaluation);
-
-    // 4. Update Latency Profiler in Right Sidebar
-    updateLatencySidebar(data.latency);
-
-    // 5. Update Evaluation Scorecard in Right Sidebar
-    updateEvaluationSidebar(data.evaluation);
 
   } catch (err) {
     console.error("Query failed:", err);
@@ -592,6 +782,13 @@ async function startVoiceRecording() {
           }
           updateEvaluationSidebar(msg.evaluation);
         }
+        // 🔊 TTS VOICE AUDIO (Sarvam Bulbul v3)
+        else if (msg.type === 'tts' && msg.audio_base64) {
+          playAudioBase64(msg.audio_base64);
+          if (currentBotBubble) {
+            updateBotMessage(currentBotBubble, lastAnswerMsg ? lastAnswerMsg.answer : streamedAnswer, lastAnswerMsg ? lastAnswerMsg.sources : [], timeStr, lastAnswerMsg ? lastAnswerMsg.evaluation : null, msg.audio_base64);
+          }
+        }
         // 🤖 GENERATED RAG ANSWER & SOURCES
         else if (msg.type === 'answer') {
           lastAnswerMsg = msg;
@@ -611,6 +808,9 @@ async function startVoiceRecording() {
         else if (msg.type === 'error') {
           console.error("Sarvam AI live error:", msg.message);
           if (transcriptBody) transcriptBody.textContent = `❌ Error: ${msg.message}`;
+          if (currentBotBubble) {
+            updateBotMessage(currentBotBubble, `⚠️ ${msg.message || 'Voice error occurred'}`, [], timeStr);
+          }
         }
       } catch (err) {
         console.error("WebSocket message parse error:", err);
@@ -735,6 +935,7 @@ async function handleAudioFileUpload(e) {
     formData.append('language', activeLang);
     formData.append('top_k', '5');
     formData.append('evaluate', evaluate ? 'true' : 'false');
+    formData.append('voice_reply', 'true');
 
     const res = await fetch('/api/v1/query/voice', {
       method: 'POST',
@@ -752,7 +953,11 @@ async function handleAudioFileUpload(e) {
     appendUserMessage(data.transcription || data.query, timeStr, true);
     saveHistoryItem(data.transcription || data.query, 'voice');
 
-    updateBotMessage(botBubble, data.answer, data.sources, timeStr, data.evaluation);
+    if (data.audio_base64) {
+      playAudioBase64(data.audio_base64);
+    }
+
+    updateBotMessage(botBubble, data.answer, data.sources, timeStr, data.evaluation, data.audio_base64);
     updateLatencySidebar(data.latency);
     updateEvaluationSidebar(data.evaluation);
 
@@ -879,7 +1084,7 @@ function appendBotLoadingMessage(timeStr, thinkingText = 'Thinking... ⏳') {
   return row;
 }
 
-function updateBotMessage(botRow, answerText, sources, timeStr, evaluation = null) {
+function updateBotMessage(botRow, answerText, sources, timeStr, evaluation = null, audioBase64 = null) {
   if (!botRow) return;
   const bubble = botRow.querySelector('.message-bubble');
   if (!bubble) return;
@@ -895,6 +1100,25 @@ function updateBotMessage(botRow, answerText, sources, timeStr, evaluation = nul
       <span class="eval-chip-inline ${scoreClass}" title="${escapeHtml(reasonTitle)}">
         🎯 DeepEval: ${scorePercent}%
       </span>
+    `;
+  }
+
+  let audioButtonHtml = '';
+  if (audioBase64) {
+    audioButtonHtml = `
+      <div>
+        <button class="audio-play-pill" onclick="playAudioBase64('${audioBase64}')" title="Play Voice Audio (Sarvam Bulbul v3)">
+          🔊 Speak Answer
+        </button>
+      </div>
+    `;
+  } else {
+    audioButtonHtml = `
+      <div>
+        <button class="audio-play-pill" onclick="synthesizeAndPlayMessage(this)" data-text="${escapeHtml(answerText)}" title="Generate & Listen in Voice (Bulbul v3)">
+          🔊 Listen
+        </button>
+      </div>
     `;
   }
 
@@ -924,6 +1148,7 @@ function updateBotMessage(botRow, answerText, sources, timeStr, evaluation = nul
       ${evalBadgeHtml}
     </div>
     <div class="message-text">${formattedAnswer}</div>
+    ${audioButtonHtml}
     ${sourcesHtml}
     <div class="message-actions">
       <button class="msg-action-btn" title="Like response">👍</button>

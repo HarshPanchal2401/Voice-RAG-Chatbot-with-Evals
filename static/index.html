@@ -229,11 +229,19 @@
           <!-- Input Controls -->
           <div class="input-trailing-controls">
             <!-- Evaluation Toggle Button -->
-            <label class="eval-toggle-label" title="Calculate DeepEval Ground Truth Evaluation Score">
-              <input type="checkbox" id="eval-toggle" checked>
+            <label class="eval-toggle-label" id="eval-toggle-label" title="Enable DeepEval Quality Evaluation">
+              <input type="checkbox" id="eval-toggle" onchange="handleEvalToggleChange(this)">
               <span class="eval-checkbox-custom"></span>
-              <span class="eval-toggle-text">Evaluation 🎯</span>
+              <span class="eval-toggle-text" id="eval-toggle-text">Eval: OFF 🎯</span>
             </label>
+
+            <!-- Voice Reply Toggle Button (Sarvam Bulbul v3) -->
+            <label class="tts-toggle-label" id="tts-toggle-label" title="Enable Voice Speech Reply (Sarvam Bulbul v3)">
+              <input type="checkbox" id="tts-toggle" onchange="handleTtsToggleChange(this)">
+              <span class="tts-checkbox-custom"></span>
+              <span class="tts-toggle-text" id="tts-toggle-text">Voice Reply: OFF 🔇</span>
+            </label>
+
 
             <span class="char-counter" id="char-counter">0 / 1000</span>
             <button id="send-query-btn" class="send-btn" onclick="submitCurrentQuery()" title="Send Question">
@@ -355,8 +363,8 @@
 
         <div class="eval-empty-state" id="eval-empty-state">
           <div class="empty-icon-circle">🎯</div>
-          <h3 class="empty-title">Automated DeepEval Evaluation</h3>
-          <p class="empty-desc">Check <strong>"Evaluation 🎯"</strong> in the bottom toolbar or pick a Golden Dataset query to see live quality scores & judge verdicts.</p>
+          <h3 class="empty-title">DeepEval Evaluation</h3>
+          <p class="empty-desc">Evaluation is currently <strong>OFF</strong> for fast answers. Turn on <strong>"Eval: ON 🎯"</strong> in the bottom toolbar if you wish to run the quality evaluation pipeline.</p>
         </div>
 
         <div class="eval-score-content" id="eval-score-content" style="display: none;">

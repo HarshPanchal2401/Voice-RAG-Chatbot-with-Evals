@@ -40,10 +40,22 @@ class TextQueryRequest(BaseModel):
         default=False,
         description="Whether to perform DeepEval evaluation after generating the answer."
     )
+    voice_reply: bool = Field(
+        default=False,
+        description="Whether to synthesize and return voice speech audio using Sarvam Bulbul v3."
+    )
     query_id: Optional[int] = Field(
         default=None,
         description="Optional Golden query ID to force ground-truth matching."
     )
+
+
+class TTSRequest(BaseModel):
+    text: str = Field(..., description="Text to synthesize to speech audio.")
+    language: Optional[str] = Field(default="gu", description="Language code ('gu', 'hi', 'gu-IN', 'hi-IN').")
+    speaker: Optional[str] = Field(default="shubh", description="Voice speaker identity.")
+    pace: Optional[float] = Field(default=1.0, ge=0.5, le=2.0, description="Speech pace/speed.")
+
 
 
 class RetrieveRequest(BaseModel):
