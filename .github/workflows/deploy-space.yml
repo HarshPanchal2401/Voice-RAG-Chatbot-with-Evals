@@ -1,0 +1,56 @@
+# Deploys v3/ to the Hugging Face Space on every push to main that changes v3/.
+# Setup once: GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+#   HF_TOKEN = a Write token from the Hugging Face account that owns the Space
+name: Deploy to Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "v3/**"
+      - ".github/workflows/deploy-space.yml"
+  workflow_dispatch:          # "Run workflow" button for manual deploys
+
+concurrency:                  # never run two deploys at once; the newest wins
+  group: deploy-space
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SPACE_ID: ${{ vars.HF_SPACE_ID || 'harshpanchal241/voice-rag' }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Hugging Face client
+        run: pip install "huggingface_hub>=0.24,<2.0"
+
+      - name: Check token
+        run: |
+          if [ -z "$HF_TOKEN" ]; then echo "::error::Add the HF_TOKEN repository secret first."; exit 1; fi
+          python -c "from huggingface_hub import whoami; print('Deploying as', whoami()['name'])"
+
+      - name: Compile Python (catch syntax errors before deploying)
+        run: python -m compileall -q v3/app.py v3/space_app.py v3/api v3/core v3/pipeline v3/schemas v3/services v3/scripts
+
+      - name: Files that will be uploaded
+        run: python v3/scripts/upload_space.py --repo "$SPACE_ID" --dry-run | tail -n 5
+
+      - name: Upload to the Space
+        env:
+          DEPLOY_MESSAGE: "Deploy ${{ github.sha }}: ${{ github.event.head_commit.message }}"
+        run: python v3/scripts/upload_space.py --repo "$SPACE_ID" --sync
+
+      - name: Summary
+        run: |
+          echo "### ✅ Deployed to https://huggingface.co/spaces/$SPACE_ID" >> "$GITHUB_STEP_SUMMARY"
+          echo "The Space now rebuilds (3–10 min). App: https://${SPACE_ID/\//-}.hf.space" >> "$GITHUB_STEP_SUMMARY"
