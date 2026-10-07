@@ -430,6 +430,7 @@
     }
     if (data.no_answer) addNote(msg, 'warn', svg('info') + '<span>No answer was found in the indexed sources.</span>');
     renderTools(msg);
+    msg.els.tools.querySelectorAll('button').forEach((b) => { if (!b.title && b.getAttribute('aria-label')) b.title = b.getAttribute('aria-label'); });
     msg.els.meta.appendChild(el('span', 'msg-time', nowTime()));
     msg.els.meta.title = 'Answer language: ' + lang;
     renderRefs(msg);
@@ -441,7 +442,7 @@
     t.innerHTML = '';
     t.hidden = false;
     if (msg.sources.length) {
-      const b = el('button', 'meta-link', svg('book') + '<span>' + msg.sources.length + ' sources</span><span class="chev">' + svg('chevron') + '</span>');
+      const b = el('button', 'meta-link', svg('book') + '<span>' + msg.sources.length + '<span class="lbl"> sources</span></span><span class="chev">' + svg('chevron') + '</span>');
       b.type = 'button'; b.setAttribute('aria-expanded', 'false');
       b.addEventListener('click', () => {
         const open = msg.els.refs.hidden;
@@ -451,7 +452,7 @@
       msg.els.meta.appendChild(b);
     }
     // Insights toggle: evaluation + latency stay hidden until opened
-    const ib = el('button', 'meta-link insights-btn', svg('chart') + '<span>Insights</span><span class="q-dot" hidden></span><span class="chev">' + svg('chevron') + '</span>');
+    const ib = el('button', 'meta-link insights-btn', svg('chart') + '<span class="lbl">Insights</span><span class="q-dot" hidden></span><span class="chev">' + svg('chevron') + '</span>');
     ib.type = 'button'; ib.setAttribute('aria-expanded', 'false'); ib.hidden = !msg.ins;
     ib.addEventListener('click', () => setInsightsOpen(msg, msg.els.insights.hidden));
     msg.insightsBtn = ib;
@@ -474,14 +475,18 @@
       updateSpeakBtn(msg);
     }
     const copy = el('button', 'tool-btn icon-only', svg('copy')); copy.type = 'button'; copy.setAttribute('aria-label', 'Copy answer');
-    copy.addEventListener('click', () => copyText(msg.answer));
+    copy.addEventListener('click', async () => {
+      await copyText(msg.answer);
+      copy.innerHTML = svg('check'); copy.classList.add('done');
+      setTimeout(() => { copy.innerHTML = svg('copy'); copy.classList.remove('done'); }, 1500);
+    });
     t.appendChild(copy);
     if (msg.traceId) {
       [['up', 1, 'Good answer'], ['down', 0, 'Bad answer']].forEach(([ic, score, label]) => {
         const b = el('button', 'tool-btn icon-only', svg(ic)); b.type = 'button'; b.setAttribute('aria-label', label);
         b.addEventListener('click', async () => {
           t.querySelectorAll('[data-fb]').forEach((x) => { x.disabled = true; });
-          b.classList.add('on');
+          b.classList.add('on', score ? 'liked' : 'disliked');
           try {
             await api('/api/v1/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trace_id: msg.traceId, score }) });
             toast('Thanks for the feedback');

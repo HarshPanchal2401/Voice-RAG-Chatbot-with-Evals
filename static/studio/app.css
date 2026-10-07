@@ -559,3 +559,50 @@ svg.ic { width: 18px; height: 18px; flex-shrink: 0; stroke: currentColor; fill: 
   .switch .track::after { width: 12px; height: 12px; }
   .switch input:checked + .track::after { transform: translateX(10px); }
 }
+
+
+/* ==========================================================================
+   Answer toolbar v2: grouped icon toolbar (left) + compact chips (right)
+   ========================================================================== */
+.msg-foot { align-items: center; gap: 8px; padding: 2px 0 0; }
+.msg-tools {
+  opacity: 1; display: inline-flex; align-items: center; gap: 0; padding: 2px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2);
+}
+.msg-tools .tool-btn { height: 28px; border-radius: 7px; color: var(--text-3); }
+.msg-tools .tool-btn.icon-only { width: 30px; }
+.msg-tools .tool-btn svg.ic { width: 15px; height: 15px; }
+.msg-tools .tool-btn:hover:not(:disabled) { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
+.msg-tools .lat-chip { padding: 0 9px 0 8px; margin-right: 3px; font-size: 12px; font-weight: 600; color: var(--text-2); }
+.msg-tools .lat-chip::after { right: -2px; top: 7px; bottom: 7px; }
+.msg-tools .tool-btn.done { color: var(--success); }
+.msg-tools .tool-btn.liked { color: var(--success); background: var(--success-soft); }
+.msg-tools .tool-btn.disliked { color: var(--danger); background: var(--danger-soft); }
+.msg-tools .tool-btn:disabled:not(.liked):not(.disliked) { opacity: .35; }
+.msg-tools .tool-btn.liked:disabled, .msg-tools .tool-btn.disliked:disabled { opacity: 1; }
+
+/* Sources + Insights as chips */
+.msg-foot .msg-meta { gap: 6px; align-items: center; }
+.msg-foot .meta-link {
+  height: 28px; padding: 0 10px; gap: 6px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface); color: var(--text-2); font-size: 12px; font-weight: 500;
+}
+.msg-foot .meta-link:hover { border-color: var(--border-strong); color: var(--text); background: var(--surface-2); }
+.msg-foot .meta-link.on, .msg-foot .meta-link[aria-expanded="true"] { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 45%, transparent); background: var(--primary-soft); }
+.msg-foot .meta-link svg.ic { width: 14px; height: 14px; }
+.msg-foot .meta-link .chev svg.ic { width: 12px; height: 12px; }
+.msg-foot .msg-time { font-size: 11px; color: var(--text-3); margin-left: 4px; font-variant-numeric: tabular-nums; }
+
+/* Mobile: everything on one line — counts only, no chevrons, no time */
+@media (max-width: 860px) {
+  .msg-foot { flex-wrap: nowrap; gap: 6px; }
+  .msg-tools .tool-btn.icon-only { width: 32px; }
+  .msg-tools .tool-btn { height: 30px; }
+  .msg-foot .msg-meta { flex-wrap: nowrap; gap: 5px; margin-left: auto; }
+  .msg-foot .meta-link { height: 30px; padding: 0 9px; gap: 5px; }
+  .msg-foot .meta-link .lbl, .msg-foot .meta-link .chev, .msg-foot .msg-time { display: none; }
+}
+@media (max-width: 360px) {
+  .msg-tools .tool-btn.icon-only { width: 28px; }
+  .msg-tools .lat-chip { padding: 0 6px; }
+}
