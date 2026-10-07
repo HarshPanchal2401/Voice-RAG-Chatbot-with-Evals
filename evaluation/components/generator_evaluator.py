@@ -1,249 +1,167 @@
 """
 Generator Component Evaluator
 =============================
-Evaluates the RAG Generation Component exclusively on:
-- Faithfulness (DeepEval): Verifies that all statements in the answer are strictly supported by context.
-- Answer Relevancy (DeepEval): Measures whether the generated answer directly addresses the question without drift.
-- LLM Generation Latency & TTFT Profiling.
+Modes:
+* ``oracle``     - the production generator (``pipeline.generator.generate_answer``, same
+                   prompt + model as the API) answers from the GOLD passages.
+* ``retrieved``  - the full production pipeline (``RAGClient.generate``: retrieval with the
+                   configured k / reranker + generation), exactly what users get.
+* ``--use-cached`` scores answers stored in a snapshot; refused when the saved answer's
+  generator model is unknown (unless ``allow_unknown_generator``) or equals the judge.
+
+Metrics: faithfulness, answer_relevance (judge; refusals get relevance 0 by rule),
+token_f1 vs the reference answer, answer_similarity (only with an embedding model),
+refusal_rate, refused_with_gold_retrieved. Generation failures are error records.
 """
 
-import os
-from typing import List, Dict, Any, Optional
-from tqdm import tqdm
+from __future__ import annotations
 
-from evaluation.config import EvaluationConfig, GROQ_MODEL_NAME
-from pipeline.generator import generate_answer as production_generate
-from evaluation.client import RAGClient
-from evaluation.metrics.generation_metrics import evaluate_generation_record
-from services.evaluation_service import GroqDeepEvalModel
-from core.tracing import traceable
+import asyncio
+import time
+from typing import Any, Dict, List, Optional, Sequence
+
+from evaluation.components.common import (
+    base_record,
+    cached_generation,
+    error_record,
+    gold_doc_keys,
+    gold_hit,
+    latency_block,
+    live_generation,
+    make_judge,
+    progress,
+    reference_answer,
+    run_concurrently,
+)
+from evaluation.config import EvaluationConfig
+from evaluation.metrics.aggregate import aggregate_records
+from evaluation.metrics.generation_metrics import GENERATION_LLM_METRICS, a_evaluate_generation_record
+from evaluation.metrics.judge import check_model_roles
 
 
 class GeneratorEvaluator:
-    """Evaluates LLM generation exclusively on Faithfulness and Answer Relevancy."""
-
     def __init__(
         self,
-        router: Optional[Any] = None,
-        client: Optional[RAGClient] = None,
+        client: Any = None,
         config: Optional[EvaluationConfig] = None,
-        use_reranker: bool = False
+        use_reranker: bool = False,
+        llm_metrics: Sequence[str] = GENERATION_LLM_METRICS,
+        judge: Any = None,
+        embedding_model: Any = None,
+        show_progress: bool = True,
+        router: Any = None,  # deprecated, ignored
     ):
         self.config = config or EvaluationConfig()
-        self.client = client or RAGClient(fallback_router=router)
-        self.router = router
+        self.client = client
         self.use_reranker = use_reranker
+        self.llm_metrics = tuple(llm_metrics)
+        self.embedding_model = embedding_model
+        self.show_progress = show_progress
+        self.judge = judge if judge is not None else (make_judge(self.config) if self.llm_metrics else None)
 
-        api_key = self.config.groq_api_key or os.environ.get("GROQ_API_KEY")
+    # ---------------------------------------------------------------- phase 1
+    def _oracle(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        from pipeline.generator import generate_answer as production_generate
 
-        # DeepEval judge model
-        self.judge_model = GroqDeepEvalModel(
-            model_name=self.config.judge_model_name,
-            api_key=api_key
-        )
-
-        self.reranker = None
-        if self.use_reranker:
-            from pipeline.reranker import RAGReranker
-            self.reranker = RAGReranker(
-                model_name=self.config.judge_model_name,
-                api_key=api_key
-            )
-
-    def generate_answer(
-        self,
-        question: str,
-        contexts: List[str],
-        lang: str = "gu"
-    ) -> Dict[str, Any]:
-        """Generates with the exact production prompt + model (generation.py)."""
-        try:
-            res = production_generate(question, contexts, lang=lang)
-            answer = res.get("answer", "")
-        except Exception as e:
-            res = {"llm_ms": 0.0, "ttft_ms": 0.0, "model": GROQ_MODEL_NAME}
-            answer = f"Error generating answer: {e}"
-
+        contexts = list(record.get("ground_truth_contexts") or [])
+        if not contexts:
+            raise ValueError("record has no gold contexts for oracle generation")
+        t0 = time.perf_counter()
+        res = production_generate(record["question"], contexts, lang=record["language"])
+        if not res or res.get("answer") is None:
+            raise RuntimeError("production generator returned no answer")
         return {
-            "answer": answer,
-            "llm_ms": res.get("llm_ms", 0.0),
-            "ttft_ms": res.get("ttft_ms", 0.0),
-            "model": res.get("model", GROQ_MODEL_NAME),
+            "answer": res["answer"],
+            "contexts": contexts,
+            "doc_keys": gold_doc_keys(record),
+            "timings": {"llm_ms": res.get("llm_ms"), "ttft_ms": res.get("ttft_ms"),
+                        "client_ms": (time.perf_counter() - t0) * 1000},
+            "generator_model": res.get("model") or self.config.generator_model_name,
+            "no_answer": None,
         }
 
-    @traceable(run_type="chain", name="eval_generator_query")
-    def evaluate_query(
-        self,
-        question: str,
-        ground_truth_answer: str,
-        contexts: List[str],
-        lang: str = "gu",
-        oracle_mode: bool = True,
-        precomputed_answer: Optional[str] = None,
-        precomputed_timings: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Evaluates Faithfulness and Answer Relevancy for a single query."""
-        # 1. Use pre-generated answer if present in dataset and in oracle mode, else generate live
-        if precomputed_answer:
-            generated_answer = precomputed_answer
-            timings = precomputed_timings or {}
-            llm_ms = timings.get("llm_ms", 0.0)
-            ttft_ms = timings.get("ttft_ms", 0.0)
-        else:
-            gen_res = self.generate_answer(question=question, contexts=contexts, lang=lang)
-            generated_answer = gen_res["answer"]
-            llm_ms = gen_res["llm_ms"]
-            ttft_ms = gen_res["ttft_ms"]
-
-        # 2. Evaluate strictly on Faithfulness and Answer Relevancy via DeepEval
-        metric_res = evaluate_generation_record(
-            question=question,
-            generated_answer=generated_answer,
-            ground_truth_answer=ground_truth_answer,
-            contexts=contexts,
-            model=self.judge_model,
-            lang=lang
-        )
-
-        return {
-            "query": question,
-            "language": lang,
-            "mode": "oracle" if oracle_mode else "retrieved",
-            "generated_answer": generated_answer,
-            "ground_truth_answer": ground_truth_answer,
-            "llm_ms": llm_ms,
-            "ttft_ms": ttft_ms,
-            "metrics": metric_res
-        }
-
-    def evaluate_dataset(
-        self,
-        records: List[Dict[str, Any]],
-        oracle_context: bool = True,
-        show_progress: bool = True
-    ) -> Dict[str, Any]:
-        """Evaluates an entire dataset of queries on Faithfulness and Answer Relevancy."""
-        results = []
-        mode_desc = "Oracle" if oracle_context else ("RAG + Re-Ranker" if self.use_reranker else "RAG Standard")
-        iterator = tqdm(records, desc=f"Evaluating Generator ({mode_desc} Mode)") if show_progress else records
-
-        for record in iterator:
-            question = record.get("question", "")
-            gt_answer = record.get("ground_truth_answer", record.get("expected_output", ""))
-            lang = record.get("language", "gu")
-            pre_answer = record.get("generated_answer")
-            pre_timings = record.get("generation_timings")
-
-            # Determine contexts: gold contexts or retrieved
-            if oracle_context:
-                contexts = record.get("ground_truth_contexts", record.get("contexts", []))
-                if not contexts and "context" in record and record["context"]:
-                    contexts = [record["context"]]
-                eval_answer = pre_answer if self.config.use_cached else None
-                eval_timings = pre_timings if self.config.use_cached else None
-            else:
-                if self.use_reranker and self.reranker:
-                    # Fetch candidate pool (10) from hybrid retrieval
-                    ret = self.client.retrieve(question, language=lang, top_k=10)
-                    cand_docs = ret.get("documents", [])
-                    # Re-rank candidates down to top 5
-                    reranked_docs, _ = self.reranker.rerank(question, cand_docs, top_k=5)
-                    contexts = [d.get("text", "") for d in reranked_docs]
-                else:
-                    ret = self.client.retrieve(question, language=lang, top_k=5)
-                    contexts = [d.get("text", "") for d in ret.get("documents", [])]
-
-                # In RAG mode, generate fresh answers using the retrieved/reranked contexts
-                eval_answer = None
-                eval_timings = None
-
+    def collect(self, records: List[Dict[str, Any]], oracle: bool, k: int) -> List[Dict[str, Any]]:
+        out = []
+        desc = "Generating (oracle contexts)" if oracle else f"Running pipeline (k={k}, rerank={self.use_reranker})"
+        for record in progress(records, desc, self.show_progress):
+            item = {"record": record, "gen": None, "error": None, "stage": "generation"}
             try:
-                res = self.evaluate_query(
-                    question=question,
-                    ground_truth_answer=gt_answer,
-                    contexts=contexts,
-                    lang=lang,
-                    oracle_mode=oracle_context,
-                    precomputed_answer=eval_answer,
-                    precomputed_timings=eval_timings
-                )
-                res["query_id"] = record.get("query_id")
-                res["query_type"] = record.get("query_type", "UNKNOWN")
-                results.append(res)
-            except Exception as e:
-                print(f"⚠️ Error evaluating generator on '{question[:30]}...': {e}")
+                if self.config.use_cached:
+                    item["gen"] = cached_generation(record, self.config.roles, self.config.allow_unknown_generator)
+                elif oracle:
+                    item["gen"] = self._oracle(record)
+                else:
+                    item["gen"] = live_generation(self.client, record, k, self.use_reranker)
+                gm = item["gen"].get("generator_model")
+                if gm and gm.strip().lower() == self.config.judge_model_name.strip().lower():
+                    raise RuntimeError(f"answer was generated by the judge model '{gm}' (self-judging)")
+            except Exception as e:  # noqa: BLE001
+                if type(e).__name__ in ("CachedAnswerError", "StaleSnapshotError", "ModelRoleError"):
+                    raise
+                item["error"] = e
+            out.append(item)
+        return out
 
-        aggregates = self._aggregate_results(results)
+    # ---------------------------------------------------------------- phase 2
+    async def _score(self, item: Dict[str, Any], oracle: bool) -> Dict[str, Any]:
+        record = item["record"]
+        if item["error"] is not None:
+            return error_record(record, item["error"], item["stage"])
+        gen = item["gen"]
+        gold = gold_doc_keys(record)
+        gold_retrieved = True if oracle else gold_hit(gen["doc_keys"], gold)
+        res = await a_evaluate_generation_record(
+            question=record["question"],
+            generated_answer=gen["answer"],
+            ground_truth_answer=reference_answer(record),
+            contexts=gen["contexts"],
+            model=self.judge,
+            embedding_model=self.embedding_model,
+            lang=record["language"],
+            llm_metrics=self.llm_metrics,
+            no_answer=gen.get("no_answer"),
+            gold_retrieved=gold_retrieved,
+            thresholds=self.config.thresholds,
+        )
+        out = base_record(record)
+        out.update({
+            "status": "ok",
+            "mode": "oracle" if oracle else "retrieved",
+            "generated_answer": gen["answer"],
+            "ground_truth_answer": reference_answer(record),
+            "generator_model": gen.get("generator_model"),
+            "retrieved_doc_keys": gen["doc_keys"],
+            "gold_doc_keys": gold,
+            "timings": gen.get("timings") or {},
+            "warning": gen.get("warning"),
+            **res,
+        })
+        return out
 
+    async def a_evaluate_dataset(self, records: List[Dict[str, Any]], oracle_context: bool = True,
+                                 k: Optional[int] = None) -> Dict[str, Any]:
+        check_model_roles(self.config.roles)
+        k = k or self.config.default_k
+        items = self.collect(records, oracle_context, k)
+        results = await run_concurrently(items, lambda it: self._score(it, oracle_context), self.config.concurrency,
+                                         desc="Scoring generation", show_progress=self.show_progress)
+        names = list(self.llm_metrics) + ["token_f1", "refusal_rate", "refused_with_gold_retrieved"]
+        if self.embedding_model is not None:
+            names.append("answer_similarity")
+        comp = "generator_reranked" if (self.use_reranker and not oracle_context) else "generator"
         return {
-            "component": "generator",
+            "component": comp,
             "mode": "oracle" if oracle_context else "retrieved",
-            "evaluated_queries": len(results),
-            "aggregates": aggregates,
-            "details": results
+            "k": None if oracle_context else k,
+            "llm_metrics": list(self.llm_metrics),
+            "evaluated_queries": sum(1 for r in results if r["status"] == "ok"),
+            "aggregates": aggregate_records(results, names, n_boot=self.config.n_boot, seed=self.config.seed),
+            "latency": latency_block(results, self.config.warmup),
+            "details": results,
         }
 
-    def _aggregate_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not results:
-            return {}
-
-        n = len(results)
-        sums = {
-            "faithfulness": 0.0,
-            "answer_relevance": 0.0,
-            "llm_ms": 0.0,
-            "ttft_ms": 0.0
-        }
-
-        by_type: Dict[str, Dict[str, float]] = {}
-        by_lang: Dict[str, Dict[str, float]] = {}
-
-        for r in results:
-            m = r["metrics"]
-            q_type = r.get("query_type", "UNKNOWN")
-            q_lang = r.get("language", "UNKNOWN")
-
-            sums["faithfulness"] += m.get("faithfulness", 0.0)
-            sums["answer_relevance"] += m.get("answer_relevance", 0.0)
-            sums["llm_ms"] += r.get("llm_ms", 0.0)
-            sums["ttft_ms"] += r.get("ttft_ms", 0.0)
-
-            # Query type breakdown
-            if q_type not in by_type:
-                by_type[q_type] = {"count": 0, "faithfulness": 0.0, "relevance": 0.0}
-            by_type[q_type]["count"] += 1
-            by_type[q_type]["faithfulness"] += m.get("faithfulness", 0.0)
-            by_type[q_type]["relevance"] += m.get("answer_relevance", 0.0)
-
-            # Lang breakdown
-            if q_lang not in by_lang:
-                by_lang[q_lang] = {"count": 0, "faithfulness": 0.0, "relevance": 0.0}
-            by_lang[q_lang]["count"] += 1
-            by_lang[q_lang]["faithfulness"] += m.get("faithfulness", 0.0)
-            by_lang[q_lang]["relevance"] += m.get("answer_relevance", 0.0)
-
-        averages = {k: round(v / n, 4) for k, v in sums.items()}
-
-        type_breakdown = {}
-        for qt, data in by_type.items():
-            c = data["count"]
-            type_breakdown[qt] = {
-                "count": c,
-                "faithfulness": round(data["faithfulness"] / c, 4),
-                "answer_relevance": round(data["relevance"] / c, 4)
-            }
-
-        lang_breakdown = {}
-        for lg, data in by_lang.items():
-            c = data["count"]
-            lang_breakdown[lg] = {
-                "count": c,
-                "faithfulness": round(data["faithfulness"] / c, 4),
-                "answer_relevance": round(data["relevance"] / c, 4)
-            }
-
-        return {
-            "overall_averages": averages,
-            "breakdown_by_query_type": type_breakdown,
-            "breakdown_by_language": lang_breakdown
-        }
+    def evaluate_dataset(self, records: List[Dict[str, Any]], oracle_context: bool = True, k: Optional[int] = None,
+                         show_progress: Optional[bool] = None) -> Dict[str, Any]:
+        if show_progress is not None:
+            self.show_progress = show_progress
+        return asyncio.run(self.a_evaluate_dataset(records, oracle_context=oracle_context, k=k))

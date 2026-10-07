@@ -1,120 +1,202 @@
 """
-RAG Service Client
-==================
-Communicates with the live RAG server (http://localhost:8000) or seamlessly
-falls back to in-process LanguageRouter if the server is offline.
+RAG Service Client (explicit mode, no silent fallback)
+======================================================
+mode="server"    : talks to the running API (``--base-url``). Sends ``X-API-Key`` from the
+                   env var ``RAG_API_KEY`` when set. 429 / 5xx are retried honouring
+                   ``Retry-After``; any other failure raises ``RAGClientError``.
+mode="inprocess" : calls a ``LanguageRouter`` passed in by the caller (same
+                   ``pipeline.ask`` / ``hybrid_retrieve`` the API uses).
+
+A run never mixes the two modes: if the server is unreachable the run fails with a
+clear message instead of switching to in-process retrieval.
 """
 
+from __future__ import annotations
+
 import json
+import os
 import time
-import urllib.request
 import urllib.error
-from typing import Dict, Any, List, Optional
+import urllib.request
+from typing import Any, Dict, Optional
+
+RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+class RAGClientError(RuntimeError):
+    pass
 
 
 class RAGClient:
-    """Connects to FastAPI Voice RAG endpoints or in-memory router."""
-
-    def __init__(self, base_url: str = "http://localhost:8000", fallback_router: Optional[Any] = None):
+    def __init__(
+        self,
+        mode: str = "server",
+        base_url: str = "http://localhost:8000",
+        router: Optional[Any] = None,
+        api_key: Optional[str] = None,
+        timeout: float = 120.0,
+        max_retries: int = 5,
+        fallback_router: Optional[Any] = None,  # deprecated alias of `router`
+    ):
+        if mode not in ("server", "inprocess"):
+            raise ValueError(f"mode must be 'server' or 'inprocess', got {mode!r}")
+        self.mode = mode
         self.base_url = base_url.rstrip("/")
-        self.fallback_router = fallback_router
-        self._server_online: Optional[bool] = None
+        self.router = router or fallback_router
+        self.api_key = api_key if api_key is not None else os.environ.get("RAG_API_KEY")
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self._health: Optional[Dict[str, Any]] = None
+        if self.mode == "inprocess" and self.router is None:
+            raise RAGClientError("mode='inprocess' needs a LanguageRouter (pass router=...).")
 
-    def is_server_online(self) -> bool:
-        if self._server_online is not None:
-            return self._server_online
+    # ------------------------------------------------------------------ http
+    def _headers(self) -> Dict[str, str]:
+        h = {"Content-Type": "application/json", "User-Agent": "RAG-Eval"}
+        if self.api_key:
+            h["X-API-Key"] = self.api_key
+        return h
+
+    def _request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None,
+                 timeout: Optional[float] = None) -> Dict[str, Any]:
+        url = f"{self.base_url}{path}"
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        last = ""
+        for attempt in range(self.max_retries + 1):
+            req = urllib.request.Request(url, data=data, method=method, headers=self._headers())
+            try:
+                with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", "replace")[:500]
+                except Exception:
+                    pass
+                last = f"HTTP {e.code} {body}"
+                if e.code in RETRY_STATUS and attempt < self.max_retries:
+                    retry_after = e.headers.get("Retry-After") if e.headers else None
+                    try:
+                        wait = float(retry_after) if retry_after else min(30.0, 2.0 ** attempt)
+                    except ValueError:
+                        wait = min(30.0, 2.0 ** attempt)
+                    time.sleep(wait)
+                    continue
+                if e.code == 401:
+                    raise RAGClientError(f"{method} {url} -> 401 Unauthorized. Set RAG_API_KEY for the evaluation run.")
+                raise RAGClientError(f"{method} {url} failed: {last}")
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                last = str(e)
+                if attempt < self.max_retries:
+                    time.sleep(min(30.0, 2.0 ** attempt))
+                    continue
+                raise RAGClientError(f"{method} {url} failed: {last}")
+        raise RAGClientError(f"{method} {url} failed after retries: {last}")
+
+    # ------------------------------------------------------------------ api
+    def check(self) -> Dict[str, Any]:
+        """Verifies the backend is usable; raises RAGClientError otherwise."""
+        if self.mode == "inprocess":
+            self._health = {"mode": "inprocess"}
+            return self._health
         try:
-            req = urllib.request.Request(f"{self.base_url}/health", headers={"User-Agent": "RAG-Eval"})
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                self._server_online = (resp.status == 200)
-        except Exception:
-            self._server_online = False
-        return self._server_online
-
-    def retrieve(self, query: str, language: str = "gu", top_k: int = 5) -> Dict[str, Any]:
-        """Retrieves passages via HTTP or in-process router."""
-        if self.is_server_online():
-            url = f"{self.base_url}/api/v1/retrieve"
-            payload = json.dumps({
-                "query": query,
-                "language": language,
-                "top_k": top_k
-            }).encode("utf-8")
-
-            req = urllib.request.Request(
-                url,
-                data=payload,
-                headers={"Content-Type": "application/json"}
+            self._health = self._request("GET", "/health", timeout=10)
+        except RAGClientError as e:
+            raise RAGClientError(
+                f"RAG server not reachable at {self.base_url} ({e}). Start the API or run with --mode inprocess."
             )
-            try:
-                t0 = time.perf_counter()
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    elapsed_ms = (time.perf_counter() - t0) * 1000
-                    timings = data.get("retrieval_timings", {})
-                    timings["retrieval_total_ms"] = elapsed_ms
-                    return {
-                        "documents": data.get("sources", []),
-                        "timings": timings,
-                        "language": language
-                    }
-            except Exception as e:
-                print(f"⚠️ API retrieve failed ({e}), falling back to in-process router...")
+        return self._health
 
-        # In-process fallback
-        if self.fallback_router:
-            pipeline = self.fallback_router.get_pipeline(language)
-            return pipeline.hybrid_retrieve(query, final_k=top_k)
+    @property
+    def health(self) -> Dict[str, Any]:
+        if self._health is None:
+            self.check()
+        return self._health or {}
 
-        raise RuntimeError("Neither live RAG server nor in-process router is available.")
+    def is_server_online(self) -> bool:  # backwards compatibility
+        if self.mode != "server":
+            return False
+        try:
+            self.check()
+            return True
+        except RAGClientError:
+            return False
 
-    def generate(self, query: str, language: str = "gu", top_k: int = 5) -> Dict[str, Any]:
-        """
-        Runs the full production RAG path (retrieve + generate) via HTTP or in-process router.
-        Always returns: answer, documents, retrieval_timings, llm_ms, ttft_ms, total_ms, trace_id.
-        """
-        if self.is_server_online():
-            url = f"{self.base_url}/api/v1/query/text"
-            payload = json.dumps({
-                "query": query,
-                "language": language,
-                "top_k": top_k,
-                "evaluate": False
-            }).encode("utf-8")
+    def retrieve(self, query: str, language: str = "gu", top_k: int = 5, use_reranker: bool = False,
+                 sort_by: str = "rrf") -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        if self.mode == "server":
+            data = self._request("POST", "/api/v1/retrieve", {
+                "query": query, "language": language, "top_k": top_k,
+                "use_reranker": use_reranker, "sort_by": sort_by, "auto_detect_language": False,
+            })
+            client_ms = (time.perf_counter() - t0) * 1000
+            timings = dict(data.get("retrieval_timings") or {})
+            return {"documents": data.get("sources") or [], "timings": timings,
+                    "language": data.get("language", language), "client_ms": client_ms}
+        pipe = self.router.get_pipeline(language)
+        res = pipe.hybrid_retrieve(query, final_k=top_k, use_reranker=use_reranker, sort_by=sort_by)
+        client_ms = (time.perf_counter() - t0) * 1000
+        return {"documents": res.get("documents") or [], "timings": dict(res.get("timings") or {}),
+                "language": res.get("language", language), "client_ms": client_ms}
 
-            req = urllib.request.Request(
-                url,
-                data=payload,
-                headers={"Content-Type": "application/json"}
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    lat = data.get("latency", {}) or {}
-                    return {
-                        "answer": data.get("answer", ""),
-                        "documents": data.get("sources", []),
-                        "retrieval_timings": lat.get("retrieval") or {},
-                        "llm_ms": lat.get("llm_ms") or 0.0,
-                        "ttft_ms": lat.get("ttft_ms") or 0.0,
-                        "total_ms": lat.get("total_ms") or 0.0,
-                        "trace_id": data.get("trace_id"),
-                    }
-            except Exception as e:
-                print(f"⚠️ API query failed ({e}), falling back to in-process router...")
-
-        # In-process fallback: the very same pipeline.ask() the API uses
-        if self.fallback_router:
-            pipeline = self.fallback_router.get_pipeline(language)
-            res = pipeline.ask(query, final_k=top_k)
+    def generate(self, query: str, language: str = "gu", top_k: int = 5, use_reranker: bool = False,
+                 sort_by: str = "rrf") -> Dict[str, Any]:
+        """Full production path (retrieve + generate). Raises RAGClientError on failure."""
+        t0 = time.perf_counter()
+        if self.mode == "server":
+            data = self._request("POST", "/api/v1/query/text", {
+                "query": query, "language": language, "top_k": top_k, "use_reranker": use_reranker,
+                "sort_by": sort_by, "auto_detect_language": False, "evaluate": False, "voice_reply": False,
+            })
+            client_ms = (time.perf_counter() - t0) * 1000
+            lat = data.get("latency") or {}
             return {
-                "answer": res.get("answer", ""),
-                "documents": res.get("documents", []),
-                "retrieval_timings": res.get("retrieval_timings", {}),
-                "llm_ms": res.get("llm_ms", 0.0),
-                "ttft_ms": res.get("ttft_ms", 0.0),
-                "total_ms": res.get("total_ms", 0.0),
-                "trace_id": res.get("trace_id"),
+                "answer": data.get("answer", ""),
+                "documents": data.get("sources") or [],
+                "retrieval_timings": lat.get("retrieval") or {},
+                "llm_ms": lat.get("llm_ms"),
+                "ttft_ms": lat.get("ttft_ms"),
+                "total_ms": lat.get("total_ms"),
+                "client_ms": client_ms,
+                "trace_id": data.get("trace_id"),
+                "no_answer": data.get("no_answer"),
+                "answer_language": data.get("answer_language"),
+                "model": data.get("model") or self.health.get("llm_model"),
+                "language": data.get("language", language),
             }
+        pipe = self.router.get_pipeline(language)
+        res = pipe.ask(query, final_k=top_k, use_reranker=use_reranker, sort_by=sort_by)
+        client_ms = (time.perf_counter() - t0) * 1000
+        return {
+            "answer": res.get("answer", ""),
+            "documents": res.get("documents") or [],
+            "retrieval_timings": res.get("retrieval_timings") or {},
+            "llm_ms": res.get("llm_ms"),
+            "ttft_ms": res.get("ttft_ms"),
+            "total_ms": res.get("total_ms"),
+            "client_ms": client_ms,
+            "trace_id": res.get("trace_id"),
+            "no_answer": res.get("no_answer"),
+            "answer_language": res.get("answer_language"),
+            "model": res.get("model"),
+            "language": res.get("language", language),
+        }
 
-        raise RuntimeError("Neither live RAG server nor in-process router is available.")
+    def describe(self) -> Dict[str, Any]:
+        info: Dict[str, Any] = {"mode": self.mode}
+        if self.mode == "server":
+            info["base_url"] = self.base_url
+            info["auth"] = bool(self.api_key)
+            h = self._health or {}
+            for k in ("reranker_backend", "llm_model", "version", "auth_required"):
+                if k in h:
+                    info[f"server_{k}"] = h[k]
+        return info
+
+
+def make_inprocess_router():
+    """Loads the full LanguageRouter (heavy: BGE-M3 + FAISS indexes)."""
+    from pipeline.router import LanguageRouter
+
+    return LanguageRouter(verbose=False)

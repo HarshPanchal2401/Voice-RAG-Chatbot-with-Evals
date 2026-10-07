@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="gu">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Voice + Text RAG — Indic AI Platform</title>
+
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+
+  <!-- Fonts: Inter (UI), JetBrains Mono (numbers), Noto Sans Gujarati & Devanagari (Indic scripts) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&family=Noto+Sans+Devanagari:wght@400;600;700&family=Noto+Sans+Gujarati:wght@400;600;700&display=swap" rel="stylesheet">
+
+  <!-- Applies the saved light/dark choice before first paint (default: follow the OS) -->
+  <script src="/static/theme-init.js?v=5.0.0"></script>
+  <link rel="stylesheet" href="/static/style.css?v=5.1.0">
+  <link rel="stylesheet" href="/static/theme.css?v=6.1.0">
+</head>
+<body class="lang-gu">
+  <a class="skip-link" href="#query-input">Skip to question input</a>
+
+  <div class="app-layout">
+
+    <!-- ======================================================== -->
+    <!-- LEFT SIDEBAR (slide-in drawer on small screens)           -->
+    <!-- ======================================================== -->
+    <aside class="sidebar-left" id="sidebar-left" aria-label="Samples and history">
+      <!-- App Brand -->
+      <div class="brand-row">
+        <div class="brand-logo-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+            <line x1="8" x2="16" y1="22" y2="22"/>
+          </svg>
+        </div>
+        <div class="brand-info">
+          <span class="brand-name" id="brand-app-title">Voice RAG</span>
+          <span class="brand-tagline" id="brand-app-subtitle">Indic AI Assistant</span>
+        </div>
+        <button type="button" class="new-chat-btn" id="new-session-btn" title="Start new conversation" aria-label="Start new conversation">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Mode Switcher -->
+      <div class="mode-switcher-container">
+        <div class="mode-switcher" role="group" aria-label="Input mode">
+          <button type="button" id="btn-mode-voice" class="mode-tab active" aria-pressed="true">
+            <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            </svg>
+            <span>Voice</span>
+          </button>
+          <button type="button" id="btn-mode-chat" class="mode-tab" aria-pressed="false">
+            <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            <span>Chat</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Sample Queries Section -->
+      <div class="sidebar-section sample-queries-section">
+        <div class="section-header">
+          <div class="section-title-wrap">
+            <h2 class="section-label" id="golden-dataset-title">Sample Queries</h2>
+            <span class="count-pill" id="sample-count" aria-label="Number of sample queries">0</span>
+          </div>
+          <button type="button" class="icon-btn-ghost refresh-btn" id="refresh-queries-btn" title="Refresh samples" aria-label="Refresh sample queries">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="sample-actions-card">
+          <button type="button" class="btn-sample-browse" id="browse-queries-btn" title="View and browse all benchmark queries">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h7"/>
+            </svg>
+            <span>Show All Queries</span>
+          </button>
+        </div>
+
+        <div class="sample-queries-list" id="sample-queries-list" aria-labelledby="golden-dataset-title">
+          <!-- Populated with the first 3 samples -->
+        </div>
+      </div>
+
+      <!-- Recent History Section -->
+      <div class="sidebar-section history-section">
+        <div class="section-header">
+          <h2 class="section-label" id="recent-history-title">Recent History</h2>
+          <button type="button" class="link-btn-subtle" id="open-history-btn" aria-label="Show all history">All</button>
+        </div>
+        <div class="history-list" id="history-list" aria-labelledby="recent-history-title">
+          <p class="empty-state-text">No queries yet</p>
+        </div>
+        <button type="button" class="clear-history-btn" id="clear-history-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+          </svg>
+          <span>Clear History</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Backdrop for the mobile drawer -->
+    <div class="drawer-backdrop" id="sidebar-backdrop" hidden></div>
+
+
+    <!-- ======================================================== -->
+    <!-- CENTER MAIN WORKSPACE                                     -->
+    <!-- ======================================================== -->
+    <main class="main-workspace">
+
+      <!-- Top Navigation Bar -->
+      <header class="top-navbar">
+        <div class="nav-left">
+          <button type="button" class="nav-icon-btn sidebar-toggle-btn" id="sidebar-toggle-btn" aria-label="Open menu" aria-controls="sidebar-left" aria-expanded="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <line x1="4" y1="6" x2="20" y2="6"/>
+              <line x1="4" y1="12" x2="20" y2="12"/>
+              <line x1="4" y1="18" x2="20" y2="18"/>
+            </svg>
+          </button>
+          <div class="status-pill checking" id="system-status-pill" role="status" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="status-text">Engine <strong>Checking…</strong></span>
+          </div>
+          <span class="nav-divider" aria-hidden="true"></span>
+          <span class="nav-model-badge" id="nav-system-name">BGE-M3 • Groq LLM • Sarvam AI</span>
+        </div>
+
+        <div class="nav-right">
+          <!-- Language Selector Dropdown -->
+          <div class="lang-dropdown-wrapper" id="top-lang-dropdown">
+            <button type="button" class="lang-pill-btn" id="current-lang-btn" aria-haspopup="true" aria-expanded="false" aria-controls="lang-dropdown-menu" aria-label="Choose language">
+              <span class="lang-flag" aria-hidden="true">🇮🇳</span>
+              <span class="lang-text" id="current-lang-label">ગુજરાતી</span>
+              <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </button>
+            <div class="lang-dropdown-menu" id="lang-dropdown-menu" role="menu" aria-label="Languages">
+              <!-- Built by app.js from GET /api/v1/languages (falls back to Gujarati/Hindi) -->
+            </div>
+          </div>
+
+          <!-- Inspector / Telemetry Panel Toggle -->
+          <button type="button" class="nav-action-btn" id="toggle-inspector-btn" title="Toggle telemetry and metrics panel" aria-controls="telemetry-panel" aria-expanded="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <line x1="18" y1="20" x2="18" y2="10"/>
+              <line x1="12" y1="20" x2="12" y2="4"/>
+              <line x1="6" y1="20" x2="6" y2="14"/>
+            </svg>
+            <span>Telemetry</span>
+          </button>
+
+          <!-- Theme Toggle Button -->
+          <button type="button" class="nav-icon-btn" id="theme-toggle-btn" title="Toggle theme" aria-label="Switch to dark theme">
+            <span id="theme-icon" aria-hidden="true">🌙</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Center Conversational & Hero Canvas (this is the scrolling element) -->
+      <div class="canvas-container" id="canvas-container">
+
+        <!-- Voice Hero Stage (Visible in Voice Mode) -->
+        <section class="voice-stage" id="voice-stage" aria-label="Voice input">
+          <div class="voice-hero-card">
+            <button type="button" class="voice-lang-badge" id="voice-lang-pill" aria-haspopup="true" aria-expanded="false" aria-controls="lang-dropdown-menu" aria-label="Choose voice language">
+              <span id="voice-stage-lang-name">ગુજરાતી (Gujarati)</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </button>
+
+            <!-- Voice Orb & Microphone Button -->
+            <div class="voice-orb-wrapper">
+              <button type="button" id="main-mic-btn" class="mic-orb-btn" title="Tap to speak" aria-label="Start voice input" aria-pressed="false">
+                <span class="orb-ring ring-outer" aria-hidden="true"></span>
+                <span class="orb-ring ring-middle" aria-hidden="true"></span>
+                <span class="orb-glow" aria-hidden="true"></span>
+                <svg class="mic-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                  <line x1="12" x2="12" y1="19" y2="22"/>
+                  <line x1="8" x2="16" y1="22" y2="22"/>
+                </svg>
+              </button>
+            </div>
+
+            <!-- Waveform Canvas -->
+            <div class="waveform-box" aria-hidden="true">
+              <canvas id="waveform-canvas" width="480" height="48"></canvas>
+            </div>
+
+            <!-- Status Indicator -->
+            <div class="voice-prompt-row">
+              <div class="listening-badge" id="listening-indicator" hidden>
+                <span class="pulsing-dot" aria-hidden="true"></span>
+                <span>Listening…</span>
+              </div>
+              <div class="speak-prompt-badge" id="speak-prompt-pill">
+                <span id="speak-prompt-text">Tap to speak</span>
+              </div>
+            </div>
+
+            <!-- Voice Transcript Card -->
+            <div class="voice-transcript-card" id="voice-transcript-card" hidden>
+              <div class="transcript-meta">
+                <span>🎙️ Live Transcript</span>
+                <span class="transcript-time" id="transcript-timestamp">--</span>
+              </div>
+              <p class="transcript-text" id="transcript-text" aria-live="polite">…</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Chat Conversation Feed -->
+        <section class="chat-feed" id="chat-feed" role="log" aria-live="polite" aria-relevant="additions" aria-label="Conversation">
+          <!-- Populated dynamically by JavaScript -->
+        </section>
+
+      </div>
+
+      <!-- Floating Bottom Prompt Dock -->
+      <footer class="bottom-dock">
+        <div class="dock-container">
+          <div class="dock-input-wrap">
+            <label for="query-input" class="visually-hidden">Your question</label>
+            <textarea
+              id="query-input"
+              class="dock-textarea"
+              placeholder="ગુજરાતી માં પ્રશ્ન લખો... (Type your question in Gujarati or English)"
+              rows="1"
+              maxlength="1000"
+              aria-describedby="char-counter"
+            ></textarea>
+          </div>
+
+          <!-- Bottom Action Bar / Toolbar Controls -->
+          <div class="dock-toolbar">
+            <div class="dock-toolbar-left">
+              <!-- Audio File Upload -->
+              <button type="button" class="dock-action-btn" id="upload-audio-btn" title="Upload audio file (WAV, MP3, M4A, OGG, WEBM, FLAC, MP4 — max 10 MB)" aria-label="Upload audio file">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+                </svg>
+              </button>
+              <input type="file" id="audio-file-input" class="visually-hidden" tabindex="-1" aria-hidden="true"
+                accept=".wav,.mp3,.m4a,.ogg,.webm,.flac,.mp4,audio/wav,audio/x-wav,audio/mpeg,audio/mp4,audio/x-m4a,audio/ogg,audio/webm,audio/flac,audio/x-flac,video/mp4">
+
+              <!-- Use Sample Query Quick Action -->
+              <button type="button" class="dock-sample-btn" id="use-sample-btn" title="Fill a random sample question into the input box">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+                </svg>
+                <span>Use Sample</span>
+              </button>
+
+              <button type="button" class="dock-subtle-link" id="dock-browse-btn" title="View and browse all benchmark queries">
+                <span>Browse All</span>
+              </button>
+
+              <span class="dock-separator" aria-hidden="true"></span>
+
+              <!-- Eval Toggle Switch -->
+              <label class="toggle-pill" id="eval-toggle-label" title="Enable DeepEval quality evaluation">
+                <input type="checkbox" id="eval-toggle">
+                <span class="toggle-switch" aria-hidden="true">
+                  <span class="toggle-slider"></span>
+                </span>
+                <span class="toggle-text" id="eval-toggle-text">Eval: OFF</span>
+              </label>
+
+              <!-- TTS Voice Reply Toggle Switch -->
+              <label class="toggle-pill" id="tts-toggle-label" title="Speak typed answers aloud (voice questions are always answered with voice)">
+                <input type="checkbox" id="tts-toggle">
+                <span class="toggle-switch" aria-hidden="true">
+                  <span class="toggle-slider"></span>
+                </span>
+                <span class="toggle-text" id="tts-toggle-text">Voice Reply: OFF</span>
+              </label>
+
+              <!-- Auto-detect language Toggle Switch -->
+              <label class="toggle-pill" id="autodetect-toggle-label" title="Detect the question's language automatically (Gujarati / Hindi)">
+                <input type="checkbox" id="autodetect-toggle" checked>
+                <span class="toggle-switch" aria-hidden="true">
+                  <span class="toggle-slider"></span>
+                </span>
+                <span class="toggle-text" id="autodetect-toggle-text">Auto-detect: ON</span>
+              </label>
+            </div>
+
+            <div class="dock-toolbar-right">
+              <span class="dock-counter" id="char-counter">0 / 1000</span>
+
+              <!-- Stop / cancel the running request -->
+              <button type="button" id="stop-generation-btn" class="dock-stop-btn" title="Stop" aria-label="Stop the current answer" hidden>
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <rect x="6" y="6" width="12" height="12" rx="2"/>
+                </svg>
+                <span>Stop</span>
+              </button>
+
+              <!-- Send Button -->
+              <button type="button" id="send-query-btn" class="dock-send-btn" title="Send question (Enter)" aria-label="Send question">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                  <line x1="22" y1="2" x2="11" y2="13"/>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="dock-caption">
+          <span id="footer-system-note">Voice + Text RAG Router • Hybrid Dense/Sparse Index • Indic NLP</span>
+        </div>
+      </footer>
+    </main>
+
+
+    <!-- ======================================================== -->
+    <!-- RIGHT SIDEBAR: TELEMETRY & METRICS INSPECTOR              -->
+    <!-- ======================================================== -->
+    <aside class="sidebar-right" id="telemetry-panel" aria-label="Telemetry and evaluation">
+      <div class="inspector-header">
+        <div class="inspector-title-wrap">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+          <h2 class="inspector-title">Telemetry &amp; Evals</h2>
+        </div>
+        <button type="button" class="close-inspector-btn" id="close-inspector-btn" title="Collapse panel" aria-label="Close telemetry panel">✕</button>
+      </div>
+
+      <div class="inspector-scroll-body">
+
+        <!-- Latency Profiler Section -->
+        <div class="inspector-card">
+          <div class="card-top-row">
+            <h3 class="card-heading">Latency Telemetry</h3>
+            <div class="latency-rating-pill" id="latency-rating-tag">
+              <span class="rating-dot" aria-hidden="true"></span>
+              <span id="latency-rating-text">Idle</span>
+            </div>
+          </div>
+
+          <div class="latency-hero-row">
+            <div class="latency-primary-readout">
+              <span class="latency-val" id="latency-total-val">--</span>
+              <span class="latency-unit">total</span>
+            </div>
+
+            <!-- Latency bar (0–4 s scale) -->
+            <div class="meter-bar-track" aria-hidden="true">
+              <div class="meter-fill" id="gauge-needle"></div>
+            </div>
+          </div>
+
+          <!-- Stage Breakdown -->
+          <div class="latency-stage-list" id="latency-breakdown-list">
+            <div class="stage-item" id="chip-stt" hidden>
+              <span class="stage-label">Audio STT</span>
+              <span class="stage-time" id="time-stt">--</span>
+            </div>
+            <div class="stage-item" id="chip-condense" hidden>
+              <span class="stage-label">Query Condense</span>
+              <span class="stage-time" id="time-condense">--</span>
+            </div>
+            <div class="stage-item">
+              <span class="stage-label">BGE-M3 Query</span>
+              <span class="stage-time" id="time-encoding">--</span>
+            </div>
+            <div class="stage-item">
+              <span class="stage-label">FAISS Dense</span>
+              <span class="stage-time" id="time-dense">--</span>
+            </div>
+            <div class="stage-item">
+              <span class="stage-label">Sparse Lexical</span>
+              <span class="stage-time" id="time-sparse">--</span>
+            </div>
+            <div class="stage-item">
+              <span class="stage-label">SQLite Metadata</span>
+              <span class="stage-time" id="time-metadata">--</span>
+            </div>
+            <div class="stage-item" id="chip-rerank" hidden>
+              <span class="stage-label">Rerank</span>
+              <span class="stage-time" id="time-rerank">--</span>
+            </div>
+            <div class="stage-item highlight">
+              <span class="stage-label">Time-To-First-Token</span>
+              <span class="stage-time" id="time-ttft">--</span>
+            </div>
+            <div class="stage-item">
+              <span class="stage-label">Groq LLM Generation</span>
+              <span class="stage-time" id="time-llm">--</span>
+            </div>
+            <div class="stage-item" id="chip-tts" hidden>
+              <span class="stage-label">Sarvam TTS</span>
+              <span class="stage-time" id="time-tts">--</span>
+            </div>
+            <div class="stage-item" id="chip-eval" hidden>
+              <span class="stage-label">DeepEval Evaluation</span>
+              <span class="stage-time" id="time-eval">--</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- DeepEval Quality Scorecard Section -->
+        <div class="inspector-card" id="sidebar-eval-card">
+          <div class="card-top-row">
+            <h3 class="card-heading">DeepEval Scorecard</h3>
+            <div class="eval-status-tags">
+              <span class="status-tag-golden" id="badge-golden-status" hidden>Golden ✨</span>
+              <span class="status-tag-open" id="badge-open-status" hidden>Open</span>
+            </div>
+          </div>
+
+          <!-- Placeholder: off / evaluating / failed / cancelled -->
+          <div class="eval-empty-state" id="eval-empty-state" data-state="off" role="status" aria-live="polite">
+            <p id="eval-empty-text">Evaluation is <strong>OFF</strong>. Turn on <strong>Eval</strong> in the bottom toolbar to run DeepEval metrics.</p>
+          </div>
+
+          <!-- Evaluated Score Content -->
+          <div class="eval-score-content" id="eval-score-content" hidden>
+
+            <!-- Composite Score Row -->
+            <div class="score-summary-row" id="overall-hero-card">
+              <div class="score-dial-wrap">
+                <svg class="score-svg-circle" viewBox="0 0 64 64" aria-hidden="true">
+                  <circle class="circle-bg" cx="32" cy="32" r="26"></circle>
+                  <circle class="circle-bar" id="score-ring-bar" cx="32" cy="32" r="26"></circle>
+                </svg>
+                <div class="score-dial-text">
+                  <span class="score-number" id="eval-overall-score" aria-label="Overall score">--</span>
+                </div>
+              </div>
+
+              <div class="score-meta-col">
+                <div class="verdict-tag" id="eval-verdict-tag">
+                  <span id="eval-verdict-text">--</span>
+                </div>
+                <div class="query-meta-tags">
+                  <span class="meta-tag" id="eval-query-type">--</span>
+                  <span class="meta-tag" id="eval-query-id">#--</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Metric Progress Bars -->
+            <div class="metric-meter-list">
+              <div class="metric-row">
+                <div class="metric-labels">
+                  <span>Answer Correctness</span>
+                  <span class="metric-val" id="m-correctness">--</span>
+                </div>
+                <div class="metric-track" aria-hidden="true">
+                  <div class="metric-fill fill-cyan" id="bar-correctness"></div>
+                </div>
+              </div>
+
+              <div class="metric-row">
+                <div class="metric-labels">
+                  <span>Faithfulness (Groundedness)</span>
+                  <span class="metric-val" id="m-faithfulness">--</span>
+                </div>
+                <div class="metric-track" aria-hidden="true">
+                  <div class="metric-fill fill-emerald" id="bar-faithfulness"></div>
+                </div>
+              </div>
+
+              <div class="metric-row">
+                <div class="metric-labels">
+                  <span>Answer Relevance</span>
+                  <span class="metric-val" id="m-relevance">--</span>
+                </div>
+                <div class="metric-track" aria-hidden="true">
+                  <div class="metric-fill fill-violet" id="bar-relevance"></div>
+                </div>
+              </div>
+
+              <div class="metric-row">
+                <div class="metric-labels">
+                  <span>Semantic Similarity</span>
+                  <span class="metric-val" id="m-similarity">--</span>
+                </div>
+                <div class="metric-track" aria-hidden="true">
+                  <div class="metric-fill fill-indigo" id="bar-similarity"></div>
+                </div>
+              </div>
+
+              <div class="metric-row">
+                <div class="metric-labels">
+                  <span>Context Recall</span>
+                  <span class="metric-val" id="m-recall">--</span>
+                </div>
+                <div class="metric-track" aria-hidden="true">
+                  <div class="metric-fill fill-amber" id="bar-recall"></div>
+                </div>
+              </div>
+            </div>
+
+            <p class="eval-failed-metrics" id="eval-failed-metrics" hidden></p>
+
+            <!-- Ground Truth Box (from the evaluation result only) -->
+            <div class="ground-truth-box" id="gt-box">
+              <div class="gt-header">
+                <span class="gt-title" id="gt-badge">Ground Truth Target</span>
+                <div class="gt-btn-group">
+                  <button type="button" class="gt-btn" id="gt-copy-btn" title="Copy ground truth" aria-label="Copy ground truth answer">Copy</button>
+                  <button type="button" class="gt-btn" id="gt-speak-btn" title="Listen to ground truth (Sarvam TTS)" aria-label="Listen to ground truth answer">Listen</button>
+                </div>
+              </div>
+              <p class="gt-body" id="gt-text">--</p>
+            </div>
+
+            <!-- Judge Rationale Box -->
+            <div class="rationale-box" id="eval-explanation-box">
+              <div class="rationale-title">Judge Rationale</div>
+              <p class="rationale-body" id="eval-explanation-text">--</p>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- All Sample Queries Modal -->
+  <div class="modal-backdrop" id="all-queries-modal" hidden>
+    <div class="modal-card modal-queries-card" role="dialog" aria-modal="true" aria-labelledby="all-queries-title" aria-describedby="all-queries-subtitle" tabindex="-1">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <div class="modal-title-row">
+            <svg class="modal-header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h7"/>
+            </svg>
+            <h3 id="all-queries-title">Benchmark Sample Queries</h3>
+            <span class="count-pill" id="modal-queries-count">0</span>
+          </div>
+          <span class="modal-subtitle" id="all-queries-subtitle">Choose a query to fill into the input box or ask it right away</span>
+        </div>
+        <div class="modal-header-actions">
+          <button type="button" class="icon-btn-ghost refresh-btn" id="modal-refresh-queries-btn" title="Shuffle and reload samples" aria-label="Shuffle and reload samples">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+            </svg>
+          </button>
+          <button type="button" class="modal-close-btn" data-close-modal aria-label="Close">&times;</button>
+        </div>
+      </div>
+
+      <!-- Quick Search & Category Filter Bar -->
+      <div class="modal-search-wrap">
+        <div class="search-input-box">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <label for="query-modal-search" class="visually-hidden">Search benchmark questions</label>
+          <input
+            type="search"
+            id="query-modal-search"
+            class="modal-search-input"
+            placeholder="Search benchmark questions..."
+            autocomplete="off"
+          >
+        </div>
+        <div class="modal-category-filters" id="modal-category-filters" role="group" aria-label="Filter by question type">
+          <button type="button" class="cat-filter-btn active" data-cat="all" aria-pressed="true">All</button>
+          <button type="button" class="cat-filter-btn" data-cat="description" aria-pressed="false">Description</button>
+          <button type="button" class="cat-filter-btn" data-cat="entity" aria-pressed="false">Entity</button>
+          <button type="button" class="cat-filter-btn" data-cat="location" aria-pressed="false">Location</button>
+          <button type="button" class="cat-filter-btn" data-cat="numeric" aria-pressed="false">Numeric</button>
+          <button type="button" class="cat-filter-btn" data-cat="person" aria-pressed="false">Person</button>
+        </div>
+      </div>
+
+      <div class="modal-body modal-queries-body" id="modal-all-queries-list">
+        <!-- Rendered by JavaScript -->
+      </div>
+    </div>
+  </div>
+
+  <!-- History Modal Dialog -->
+  <div class="modal-backdrop" id="history-modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="history-modal-title" tabindex="-1">
+      <div class="modal-header">
+        <h3 id="history-modal-title">Query History</h3>
+        <button type="button" class="modal-close-btn" data-close-modal aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-history-list">
+        <!-- Populated dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <!-- API Key Modal (shown when /health reports auth_required) -->
+  <div class="modal-backdrop" id="api-key-modal" hidden>
+    <div class="modal-card modal-small" role="dialog" aria-modal="true" aria-labelledby="api-key-title" aria-describedby="api-key-desc" tabindex="-1">
+      <div class="modal-header">
+        <h3 id="api-key-title">API key required</h3>
+        <button type="button" class="modal-close-btn" data-close-modal aria-label="Close">&times;</button>
+      </div>
+      <form class="modal-body api-key-form" id="api-key-form" novalidate>
+        <p class="modal-help-text" id="api-key-desc">This server requires an API key. It is stored in this browser only and sent with every request.</p>
+        <label class="field-label" for="api-key-input">API key</label>
+        <input type="password" id="api-key-input" class="text-field" autocomplete="off" spellcheck="false" required>
+        <p class="field-error" id="api-key-error" role="alert" hidden></p>
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" data-close-modal>Cancel</button>
+          <button type="submit" class="btn-primary" id="api-key-save-btn">Save key</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast notifications -->
+  <div class="toast-region" id="toast-region" role="status" aria-live="polite"></div>
+
+  <!-- Application Logic -->
+  <script src="/static/utils.js?v=5.0.0"></script>
+  <script src="/static/app.js?v=5.0.0"></script>
+  <script src="/static/resizer.js?v=1.0.0"></script>
+</body>
+</html>

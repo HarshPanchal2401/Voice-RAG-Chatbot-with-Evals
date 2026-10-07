@@ -1,188 +1,198 @@
 """
 Generation Component Metrics
 ============================
-Evaluates generation fidelity using:
-1. Faithfulness (DeepEval FaithfulnessMetric)
-2. Answer Relevancy (DeepEval AnswerRelevancyMetric)
-3. Semantic Embedding Similarity (BGE-M3 Cosine Distance)
-4. Indic Token-Level Precision, Recall, and F1
+LLM-judge metrics (DeepEval; failure policy in ``evaluation.metrics.base``):
+    faithfulness       - are the answer's claims supported by the context?
+    answer_relevance   - does the answer address the question?
+
+Rule-based (deterministic, documented - not judge substitutes):
+    answer_relevance of a refusal = 0.0 (a refusal does not answer the question; no
+    judge call is made). ``refusal_rate`` and ``refused_with_gold_retrieved`` are
+    reported so refusals are visible instead of hidden in averages.
+
+Lexical / embedding (separately named):
+    token_f1           - multiset token F1 against the reference answer (shared tokenizer)
+    answer_similarity  - embedding cosine similarity (only when an embedding model is given)
 """
 
-import re
-import numpy as np
-from typing import List, Dict, Any, Optional, Tuple
-from deepeval.test_case import LLMTestCase
-from deepeval.metrics import FaithfulnessMetric, AnswerRelevancyMetric
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Dict, List, Optional, Sequence
+
+from evaluation.metrics.base import a_run_metric, collect, failed, outcome, run_metric, skipped
+from evaluation.metrics.text_utils import is_refusal, token_f1
+
+NO_CONTEXT = "(no context provided)"
+GENERATION_LLM_METRICS = ("faithfulness", "answer_relevance")
+REFUSAL_RELEVANCE_REASON = (
+    "Rule: the answer is a refusal ('information not available'), so it does not address "
+    "the question; answer_relevance = 0 without a judge call."
+)
 
 
-# ============================================================
-# DeepEval Faithfulness & Answer Relevancy (LLM-as-a-Judge)
-# ============================================================
-# Robust Lexical Fallbacks for Generation
-# ============================================================
+def _faith_metric(model: Any, threshold: float, async_mode: bool):
+    from deepeval.metrics import FaithfulnessMetric
 
-def _fallback_faithfulness(answer: str, contexts: List[str]) -> Tuple[float, str]:
-    if not answer or not contexts:
-        return 0.0, "Answer or context is empty."
-    all_ctx = " ".join(contexts).lower()
-    words = [w for w in re.findall(r"\w+", answer.lower()) if len(w) > 2]
-    if not words:
-        return 0.8, "Answer contains only short tokens."
-    grounded_count = sum(1 for w in words if w in all_ctx)
-    ratio = grounded_count / len(words)
-    if ratio >= 0.45:
-        score = round(min(1.0, 0.75 + (ratio * 0.25)), 4)
-        return score, f"Grounding verified by factual token overlap ({ratio:.1%})."
-    elif ratio > 0.2:
-        return 0.70, f"Moderate factual context overlap detected ({ratio:.1%})."
-    return round(ratio, 4), f"Low factual overlap ({ratio:.1%}) with retrieved context."
+    return FaithfulnessMetric(threshold=threshold, model=model, include_reason=True, async_mode=async_mode)
 
 
-def _fallback_answer_relevance(question: str, answer: str) -> Tuple[float, str]:
-    if not answer or not question:
-        return 0.0, "Question or answer is empty."
-    q_words = [w for w in re.findall(r"\w+", question.lower()) if len(w) > 2]
-    ans_lower = answer.lower()
-    refusals = ["મને ખબર નથી", "પૂરતી માહિતી ઉપલબ્ધ નથી", "પર્યાપ્ત જાણકારી ઉપલબ્ધ નહીં", "जानकारी उपलब्ध नहीं", "not enough information"]
-    if any(r in ans_lower for r in refusals):
-        return 0.5, "Response is a standard lack-of-context refusal."
+def _relevancy_metric(model: Any, threshold: float, async_mode: bool):
+    from deepeval.metrics import AnswerRelevancyMetric
 
-    if not q_words:
-        return 0.85, "Answer provided for short query."
-    overlap = sum(1 for w in q_words if w in ans_lower) / len(q_words)
-    if overlap >= 0.25:
-        score = round(min(1.0, 0.80 + (overlap * 0.20)), 4)
-        return score, f"Answer addresses key question entities ({overlap:.1%} keyword overlap)."
-    return 0.75, "Answer provides relevant response to query."
+    return AnswerRelevancyMetric(threshold=threshold, model=model, include_reason=True, async_mode=async_mode)
 
 
-def compute_faithfulness(
-    question: str,
-    answer: str,
-    contexts: List[str],
-    model: Any,
-    threshold: float = 0.7
-) -> Dict[str, Any]:
-    """
-    Measures Faithfulness via DeepEval:
-    Verifies if statements in the generated response are factually supported by the context.
-    """
-    ctx_list = contexts if contexts else ["No context provided."]
-    test_case = LLMTestCase(
-        input=question,
-        actual_output=answer,
-        retrieval_context=ctx_list
-    )
+def _faith_case(question: str, answer: str, contexts: List[str]):
+    from deepeval.test_case import LLMTestCase
 
-    metric = FaithfulnessMetric(threshold=threshold, model=model, include_reason=True)
+    ctx = [c for c in (contexts or []) if (c or "").strip()] or [NO_CONTEXT]
+    return LLMTestCase(input=question, actual_output=answer or "", retrieval_context=ctx)
+
+
+def _rel_case(question: str, answer: str):
+    from deepeval.test_case import LLMTestCase
+
+    return LLMTestCase(input=question, actual_output=answer or "")
+
+
+def compute_faithfulness(question: str, answer: str, contexts: List[str], model: Any,
+                         threshold: float = 0.7) -> Dict[str, Any]:
+    if model is None:
+        return failed("no judge model configured")
+    if not (answer or "").strip():
+        return skipped("empty answer")
+    return run_metric(_faith_metric(model, threshold, False), _faith_case(question, answer, contexts))
+
+
+async def a_compute_faithfulness(question: str, answer: str, contexts: List[str], model: Any,
+                                 threshold: float = 0.7) -> Dict[str, Any]:
+    if model is None:
+        return failed("no judge model configured")
+    if not (answer or "").strip():
+        return skipped("empty answer")
+    return await a_run_metric(_faith_metric(model, threshold, True), _faith_case(question, answer, contexts))
+
+
+def compute_answer_relevance(question: str, answer: str, model: Any, threshold: float = 0.7,
+                             refused: Optional[bool] = None) -> Dict[str, Any]:
+    is_ref = refused if refused is not None else is_refusal(answer)
+    if is_ref:
+        return outcome(0.0, reason=REFUSAL_RELEVANCE_REASON)
+    if model is None:
+        return failed("no judge model configured")
+    return run_metric(_relevancy_metric(model, threshold, False), _rel_case(question, answer))
+
+
+async def a_compute_answer_relevance(question: str, answer: str, model: Any, threshold: float = 0.7,
+                                     refused: Optional[bool] = None) -> Dict[str, Any]:
+    is_ref = refused if refused is not None else is_refusal(answer)
+    if is_ref:
+        return outcome(0.0, reason=REFUSAL_RELEVANCE_REASON)
+    if model is None:
+        return failed("no judge model configured")
+    return await a_run_metric(_relevancy_metric(model, threshold, True), _rel_case(question, answer))
+
+
+def compute_indic_token_f1(prediction: str, ground_truth: str, lang: str = "gu") -> Dict[str, Optional[float]]:
+    """Token-level precision / recall / F1 with the shared Unicode-aware tokenizer."""
+    return token_f1(prediction, ground_truth)
+
+
+def compute_semantic_similarity(text_a: str, text_b: str, embedding_model: Any) -> Dict[str, Any]:
+    """Cosine similarity of embeddings mapped to [0, 1]. Skipped without a model; failure -> None."""
+    if embedding_model is None:
+        return skipped("no embedding model")
+    if not text_a or not text_b:
+        return skipped("empty text")
     try:
-        metric.measure(test_case)
-        score = round(float(metric.score), 4)
-        reason = metric.reason or "Claims are grounded in context."
-        return {"score": score, "reason": reason, "success": score >= threshold}
-    except Exception as e:
-        fb_score, fb_reason = _fallback_faithfulness(answer, ctx_list)
-        return {"score": fb_score, "reason": f"[heuristic fallback: judge failed] {fb_reason} (DeepEval notice: {str(e)})", "success": fb_score >= threshold, "fallback": True}
+        import numpy as np
+
+        emb_a = np.asarray(embedding_model.encode_query(text_a)[0], dtype=float)
+        emb_b = np.asarray(embedding_model.encode_query(text_b)[0], dtype=float)
+        denom = float(np.linalg.norm(emb_a) * np.linalg.norm(emb_b))
+        if denom == 0:
+            return failed("zero-norm embedding")
+        sim = float(np.dot(emb_a, emb_b)) / denom
+        return outcome(max(0.0, min(1.0, (sim + 1.0) / 2.0)), reason="embedding cosine mapped to [0,1]")
+    except Exception as e:  # noqa: BLE001
+        return failed(f"embedding similarity failed: {type(e).__name__}: {e}")
 
 
-def compute_answer_relevance(
-    question: str,
-    answer: str,
-    model: Any,
-    threshold: float = 0.7
-) -> Dict[str, Any]:
-    """
-    Measures Answer Relevancy via DeepEval:
-    Determines whether the generated answer directly addresses the question without fluff.
-    """
-    test_case = LLMTestCase(
-        input=question,
-        actual_output=answer
-    )
-
-    metric = AnswerRelevancyMetric(threshold=threshold, model=model, include_reason=True)
-    try:
-        metric.measure(test_case)
-        score = round(float(metric.score), 4)
-        reason = metric.reason or "Answer directly addresses the input question."
-        return {"score": score, "reason": reason, "success": score >= threshold}
-    except Exception as e:
-        fb_score, fb_reason = _fallback_answer_relevance(question, answer)
-        return {"score": fb_score, "reason": f"[heuristic fallback: judge failed] {fb_reason} (DeepEval notice: {str(e)})", "success": fb_score >= threshold, "fallback": True}
+def refusal_outcomes(answer: str, no_answer: Optional[bool], gold_retrieved: Optional[bool]) -> Dict[str, Dict[str, Any]]:
+    refused = is_refusal(answer, no_answer)
+    res = {"refusal_rate": outcome(1.0 if refused else 0.0)}
+    if gold_retrieved is None:
+        res["refused_with_gold_retrieved"] = skipped("gold retrieval unknown")
+    else:
+        res["refused_with_gold_retrieved"] = outcome(1.0 if (refused and gold_retrieved) else 0.0)
+    return res
 
 
-# ============================================================
-# Indic Token F1 & Embedding Semantic Similarity
-# ============================================================
-
-def compute_indic_token_f1(prediction: str, ground_truth: str, lang: str = "gu") -> Dict[str, float]:
-    """
-    Token-level Precision, Recall, and F1 score tailored for Indic script text.
-    Strips punctuation, handles zero division gracefully.
-    """
-    if not prediction or not ground_truth:
-        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
-
-    def tokenize(s: str) -> List[str]:
-        cleaned = re.sub(r"[?!.,\-_:;।()\[\]{}\"\'`]", "", s.lower())
-        return [w for w in cleaned.split() if w]
-
-    pred_tokens = tokenize(prediction)
-    gt_tokens = tokenize(ground_truth)
-
-    if not pred_tokens or not gt_tokens:
-        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
-
-    common = set(pred_tokens).intersection(set(gt_tokens))
-    num_same = sum(min(pred_tokens.count(w), gt_tokens.count(w)) for w in common)
-
-    if num_same == 0:
-        return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
-
-    precision = num_same / len(pred_tokens)
-    recall = num_same / len(gt_tokens)
-    f1 = (2 * precision * recall) / (precision + recall)
-
-    return {
-        "precision": round(precision, 4),
-        "recall": round(recall, 4),
-        "f1": round(f1, 4)
-    }
-
-
-def compute_semantic_similarity(text_a: str, text_b: str, embedding_model: Any) -> float:
-    """Computes cosine embedding similarity using BGE-M3."""
-    if not embedding_model or not text_a or not text_b:
-        return 0.0
-    try:
-        emb_a = embedding_model.encode_query(text_a)[0]
-        emb_b = embedding_model.encode_query(text_b)[0]
-        sim = float(np.dot(emb_a, emb_b))
-        return round(max(0.0, min(1.0, (sim + 1.0) / 2.0)), 4)
-    except Exception:
-        return 0.0
+def _lexical(generated_answer, ground_truth_answer, embedding_model, no_answer, gold_retrieved):
+    res: Dict[str, Dict[str, Any]] = {}
+    f1 = token_f1(generated_answer, ground_truth_answer)["f1"]
+    res["token_f1"] = outcome(f1) if f1 is not None else skipped("no reference answer or empty answer")
+    if embedding_model is not None:
+        res["answer_similarity"] = compute_semantic_similarity(generated_answer, ground_truth_answer, embedding_model)
+    res.update(refusal_outcomes(generated_answer, no_answer, gold_retrieved))
+    return res
 
 
 def evaluate_generation_record(
     question: str,
     generated_answer: str,
-    ground_truth_answer: str,
+    ground_truth_answer: Optional[str],
     contexts: List[str],
     model: Any,
     embedding_model: Optional[Any] = None,
-    lang: str = "gu"
+    lang: str = "gu",
+    llm_metrics: Sequence[str] = GENERATION_LLM_METRICS,
+    no_answer: Optional[bool] = None,
+    gold_retrieved: Optional[bool] = None,
+    thresholds: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
-    """Evaluates generation fidelity strictly on Faithfulness and Answer Relevancy."""
-    # 1. Faithfulness (DeepEval)
-    f_res = compute_faithfulness(question, generated_answer, contexts, model)
+    thresholds = thresholds or {}
+    res = _lexical(generated_answer, ground_truth_answer, embedding_model, no_answer, gold_retrieved)
+    refused = res["refusal_rate"]["score"] == 1.0
+    if "faithfulness" in llm_metrics:
+        res["faithfulness"] = compute_faithfulness(question, generated_answer, contexts, model,
+                                                   thresholds.get("faithfulness", 0.7))
+    if "answer_relevance" in llm_metrics:
+        res["answer_relevance"] = compute_answer_relevance(question, generated_answer, model,
+                                                           thresholds.get("answer_relevance", 0.7), refused=refused)
+    out = collect(res)
+    out["refused"] = refused
+    return out
 
-    # 2. Answer Relevancy (DeepEval)
-    r_res = compute_answer_relevance(question, generated_answer, model)
 
-    return {
-        "faithfulness": f_res["score"],
-        "faithfulness_reason": f_res.get("reason", ""),
-        "answer_relevance": r_res["score"],
-        "answer_relevance_reason": r_res.get("reason", "")
-    }
-
+async def a_evaluate_generation_record(
+    question: str,
+    generated_answer: str,
+    ground_truth_answer: Optional[str],
+    contexts: List[str],
+    model: Any,
+    embedding_model: Optional[Any] = None,
+    lang: str = "gu",
+    llm_metrics: Sequence[str] = GENERATION_LLM_METRICS,
+    no_answer: Optional[bool] = None,
+    gold_retrieved: Optional[bool] = None,
+    thresholds: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    thresholds = thresholds or {}
+    res = _lexical(generated_answer, ground_truth_answer, embedding_model, no_answer, gold_retrieved)
+    refused = res["refusal_rate"]["score"] == 1.0
+    names, coros = [], []
+    if "faithfulness" in llm_metrics:
+        names.append("faithfulness")
+        coros.append(a_compute_faithfulness(question, generated_answer, contexts, model,
+                                            thresholds.get("faithfulness", 0.7)))
+    if "answer_relevance" in llm_metrics:
+        names.append("answer_relevance")
+        coros.append(a_compute_answer_relevance(question, generated_answer, model,
+                                                thresholds.get("answer_relevance", 0.7), refused=refused))
+    for name, r in zip(names, await asyncio.gather(*coros)):
+        res[name] = r
+    out = collect(res)
+    out["refused"] = refused
+    return out

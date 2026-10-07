@@ -7,25 +7,23 @@ Search-only endpoint for testing and integrating the hybrid retrieval and sortin
 from fastapi import APIRouter, Depends, HTTPException
 from starlette.concurrency import run_in_threadpool
 
-from pipeline.router import LanguageRouter
+from core.security import PROTECTED_LIMITED
 from api.dependencies import get_router
-from api.helpers import format_sources
+from api.helpers import build_retrieval_timings, format_sources
 from schemas.requests import RetrieveRequest
 from schemas.responses import RetrievalResponse
-from schemas.models import RetrievalTimings
 
 router = APIRouter()
 
 
-@router.post("/api/v1/retrieve", response_model=RetrievalResponse, tags=["Retrieval"])
+@router.post("/api/v1/retrieve", response_model=RetrievalResponse, tags=["Retrieval"], dependencies=PROTECTED_LIMITED)
 async def retrieve_passages(
     payload: RetrieveRequest,
-    router_instance: LanguageRouter = Depends(get_router)
+    router_instance=Depends(get_router),
 ):
     """
-    Search-Only Endpoint:
-    Returns ranked passages for target language with RRF scores, dense/sparse ranks, and SQLite metadata.
-    Supports multi-strategy sorting ('rrf', 'dense', 'sparse', 'rerank') and secondary listwise re-ranking.
+    Search-only: ranked passages for the target language with RRF scores, dense/sparse ranks and
+    SQLite metadata. Sorting: 'rrf' | 'dense' | 'sparse' | 'rerank'; optional re-ranking.
     """
     query = payload.query.strip()
     if not query:
@@ -51,6 +49,6 @@ async def retrieve_passages(
         query=query,
         language=target_lang,
         top_k=payload.top_k,
-        sources=format_sources(retrieval_result["documents"], lang=target_lang),
-        retrieval_timings=RetrievalTimings(**retrieval_result["timings"])
+        sources=format_sources(retrieval_result.get("documents") or [], lang=target_lang),
+        retrieval_timings=build_retrieval_timings(retrieval_result.get("timings")),
     )

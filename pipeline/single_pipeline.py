@@ -2,19 +2,17 @@
 Single Language Pipeline Instance
 =================================
 Dedicated pipeline for a single language (Index + Sparse Matrix + SQLite + Evaluator + Reranker).
-Uses the shared multilingual BGE-M3 Query Encoder.
+Uses the shared multilingual BGE-M3 Query Encoder and (optionally) a shared reranker.
 """
 
 import gc
 import json
-import sqlite3
 import unicodedata
 import re
 import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple, Generator
+from typing import Dict, Any, Iterable, List, Optional, Generator
 
-import numpy as np
 import faiss
 from scipy import sparse
 from groq import Groq
@@ -25,15 +23,19 @@ from core.config import (
     DEFAULT_HNSW_EF_SEARCH,
     BGE_QUERY_MAX_LENGTH,
     FINAL_TOP_K,
+    CONDENSE_QUERY,
 )
 from core.tracing import traceable, add_run_metadata, current_trace_id
 from pipeline.embeddings import NativeBGEM3
-from pipeline.metadata_store import MetadataStore
+from pipeline.metadata_store import MetadataStore, make_doc_key
 from pipeline.reranker import RAGReranker
 from pipeline.retriever import HybridRetriever
 from pipeline.generator import (
     build_context as _build_context,
     build_user_prompt as _build_user_prompt,
+    condense_query,
+    detect_answer_language,
+    normalize_history,
     stream_answer,
 )
 from services.evaluation_service import DeepEvalEvaluator
@@ -49,7 +51,8 @@ def _stream_reduce(items: List[dict]) -> dict:
 class SingleLanguagePipeline:
     """
     Dedicated pipeline instance for a single language.
-    Orchestrates retrieval, sorting, re-ranking, prompt assembly, generation, and evaluation.
+    Orchestrates query condensing, retrieval, sorting, re-ranking, prompt assembly,
+    generation, and evaluation.
     """
 
     def __init__(
@@ -59,7 +62,8 @@ class SingleLanguagePipeline:
         eval_dir: Optional[Path],
         shared_bge_encoder: NativeBGEM3,
         groq_client: Optional[Groq] = None,
-        verbose: bool = True
+        verbose: bool = True,
+        reranker: Optional[RAGReranker] = None,
     ):
         self.lang_code = lang_code
         self.meta = LANGUAGE_METADATA.get(lang_code, LANGUAGE_METADATA["gu"])
@@ -69,7 +73,7 @@ class SingleLanguagePipeline:
         self.groq_client = groq_client
         self.verbose = verbose
         self.system_prompt = SYSTEM_PROMPTS.get(lang_code, SYSTEM_PROMPTS["gu"])
-        self._reranker = None
+        self._reranker = reranker
 
         self._resolve_paths()
         self._load_manifest()
@@ -171,7 +175,7 @@ class SingleLanguagePipeline:
     def encode_query(self, query: str):
         query = self.clean_text(query)
         dense, tok_ids, tok_w = self.bge_model.encode_hybrid(query, max_length=BGE_QUERY_MAX_LENGTH)
-        faiss.normalize_L2(dense)
+        faiss.normalize_L2(dense)  # encoder returns a private copy, so in-place is safe
         valid = (tok_ids >= 0) & (tok_ids < self.sparse_dim)
         return dense, (tok_ids[valid], tok_w[valid])
 
@@ -212,11 +216,11 @@ class SingleLanguagePipeline:
         retrieval["timings"]["retrieval_total_ms"] += encode_ms
         return retrieval
 
-    def build_context(self, documents: List[dict]) -> str:
-        return _build_context([doc["text"] for doc in documents], self.lang_code)
+    def build_context(self, documents: List[dict], answer_lang: Optional[str] = None) -> str:
+        return _build_context([doc["text"] for doc in documents], answer_lang or self.lang_code)
 
-    def build_user_prompt(self, query: str, context: str) -> str:
-        return _build_user_prompt(query, context, self.lang_code)
+    def build_user_prompt(self, query: str, context: str, answer_lang: Optional[str] = None) -> str:
+        return _build_user_prompt(query, context, answer_lang or self.lang_code)
 
     @traceable(run_type="chain", name="rag_ask")
     def ask(
@@ -225,9 +229,10 @@ class SingleLanguagePipeline:
         final_k: int = FINAL_TOP_K,
         use_reranker: bool = False,
         sort_by: str = "rrf",
+        history: Optional[Iterable[Any]] = None,
     ) -> dict:
-        result = {}
-        for item in self.ask_stream(query, final_k=final_k, use_reranker=use_reranker, sort_by=sort_by):
+        result: Dict[str, Any] = {}
+        for item in self.ask_stream(query, final_k=final_k, use_reranker=use_reranker, sort_by=sort_by, history=history):
             if item["type"] == "meta":
                 result = item
         result.pop("type", None)
@@ -241,33 +246,62 @@ class SingleLanguagePipeline:
         final_k: int = FINAL_TOP_K,
         use_reranker: bool = False,
         sort_by: str = "rrf",
+        history: Optional[Iterable[Any]] = None,
     ) -> Generator[dict, None, None]:
+        """
+        Streams {"type": "token", "content"} items, then one {"type": "meta", ...} item with
+        language, answer_language, retrieval_query, no_answer, answer, documents,
+        retrieval_timings (incl. condense_ms), ttft_ms, llm_ms, total_ms, model, trace_id.
+        """
         t_start = time.perf_counter()
-        retrieval = self.hybrid_retrieve(query, final_k=final_k, use_reranker=use_reranker, sort_by=sort_by)
-        contexts = [d["text"] for d in retrieval["documents"]]
+        history = normalize_history(history)
+        answer_language = detect_answer_language(query, self.lang_code)
 
+        # 1. Follow-up -> standalone retrieval query (only with history)
+        retrieval_query = query
+        condense_ms: Optional[float] = None
+        if history and CONDENSE_QUERY:
+            t0 = time.perf_counter()
+            retrieval_query = condense_query(query, history, lang=answer_language) or query
+            condense_ms = (time.perf_counter() - t0) * 1000
+
+        # 2. Retrieval (+ optional rerank; may return no documents -> no-answer path)
+        retrieval = self.hybrid_retrieve(retrieval_query, final_k=final_k, use_reranker=use_reranker, sort_by=sort_by)
+        retrieval["timings"]["condense_ms"] = condense_ms
+        documents = retrieval["documents"]
+        contexts = [d["text"] for d in documents if d.get("text")]
+
+        # 3. Generation (the LLM sees the user's own question plus the conversation)
         done: Dict[str, Any] = {}
-        for item in stream_answer(query, contexts, lang=self.lang_code):
+        for item in stream_answer(query, contexts, lang=self.lang_code, history=history, answer_lang=answer_language):
             if item["type"] == "token":
                 yield item
             else:
                 done = item
 
         total_ms = (time.perf_counter() - t_start) * 1000
+        no_answer = bool(done.get("no_answer", not contexts))
         add_run_metadata(
             language=self.lang_code,
+            answer_language=answer_language,
             model=done.get("model"),
+            no_answer=no_answer,
+            condensed=retrieval_query != query,
             ttft_ms=round(done.get("ttft_ms", 0.0), 2),
             llm_ms=round(done.get("llm_ms", 0.0), 2),
             retrieval_ms=round(retrieval["timings"]["retrieval_total_ms"], 2),
+            condense_ms=round(condense_ms, 2) if condense_ms is not None else None,
             total_ms=round(total_ms, 2),
         )
 
         yield {
             "type": "meta",
             "language": self.lang_code,
+            "answer_language": answer_language,
+            "retrieval_query": retrieval_query,
+            "no_answer": no_answer,
             "answer": done.get("answer", ""),
-            "documents": retrieval["documents"],
+            "documents": documents,
             "retrieval_timings": retrieval["timings"],
             "ttft_ms": done.get("ttft_ms", 0.0),
             "llm_ms": done.get("llm_ms", 0.0),
@@ -276,32 +310,54 @@ class SingleLanguagePipeline:
             "trace_id": current_trace_id(),
         }
 
+    @staticmethod
+    def _doc_key(d: Dict[str, Any]) -> Optional[str]:
+        if d.get("doc_key"):
+            return d["doc_key"]
+        if d.get("query_id") is not None and d.get("passage_id") is not None:
+            return make_doc_key(d["query_id"], d["passage_id"])
+        return None
+
     @traceable(run_type="chain", name="deepeval_evaluate")
-    def evaluate(self, *args, **kwargs) -> dict:
+    def evaluate(
+        self,
+        query: str = "",
+        answer: str = "",
+        documents: Optional[List[Dict[str, Any]]] = None,
+        query_id: Optional[int] = None,
+        allow_open_eval: bool = True,
+    ) -> dict:
         if not self.evaluator:
             return {
                 "is_golden": False,
+                "query_id": query_id,
+                "query_type": None,
+                "ground_truth_answer": None,
                 "warning": "⚠️ Evaluator not initialized or golden dataset not found.",
-                "scores": None
+                "scores": None,
+                "failed_metrics": [],
             }
 
-        query = kwargs.get("query") or (args[0] if len(args) > 0 else "")
-        answer = kwargs.get("answer") or (args[1] if len(args) > 1 else "")
-        documents = kwargs.get("documents") or (args[2] if len(args) > 2 else [])
-        query_id = kwargs.get("query_id") or (args[3] if len(args) > 3 else None)
-        allow_open_eval = kwargs.get("allow_open_eval", True)
+        documents = documents or []
+        contexts = [d.get("text", "") for d in documents]
+        passage_ids = [d["passage_id"] if d.get("passage_id") is not None else d.get("chunk_id") for d in documents]
+        doc_keys = [self._doc_key(d) for d in documents]
 
-        contexts = [d.get("text", "") for d in documents] if documents else []
-        passage_ids = [d.get("passage_id", d.get("chunk_id")) for d in documents] if documents else []
-
-        return self.evaluator.evaluate(
+        kwargs = dict(
             question=query,
             generated_answer=answer,
             retrieved_contexts=contexts,
             retrieved_passage_ids=passage_ids,
             query_id=query_id,
-            allow_open_eval=allow_open_eval
+            allow_open_eval=allow_open_eval,
         )
+        try:
+            return self.evaluator.evaluate(**kwargs, retrieved_doc_keys=doc_keys)
+        except TypeError as e:
+            if "retrieved_doc_keys" not in str(e):
+                raise
+            # Evaluator without doc-key support (older services/evaluation_service.py)
+            return self.evaluator.evaluate(**kwargs)
 
     def get_sample_queries(self, count: int = 20) -> list:
         if self.evaluator:

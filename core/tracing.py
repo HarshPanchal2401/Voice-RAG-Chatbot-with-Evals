@@ -8,12 +8,27 @@ Supports async feedback logging, OpenAI LLM client wrapping, and run metadata.
 import os
 import threading
 from typing import Any, Dict, Iterable, List, Optional
+
+import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
+# Main generator / judge client: the SDK retries connection errors, 408/409/429 and 5xx with
+# exponential backoff (honouring Retry-After), so transient Groq rate limits do not fail a request.
+def _env_number(name: str, default: float) -> float:
+    try:
+        return float((os.environ.get(name) or "").strip().strip('"') or default)
+    except ValueError:
+        return default
+
+
+LLM_MAX_RETRIES = max(0, int(_env_number("RAG_LLM_MAX_RETRIES", 3)))
+LLM_TIMEOUT_S = max(5.0, _env_number("RAG_LLM_TIMEOUT", 30.0))
+LLM_CONNECT_TIMEOUT_S = 5.0
 
 try:
     import langsmith
@@ -75,22 +90,49 @@ def add_run_metadata(**metadata: Any) -> None:
 
 _client_lock = threading.Lock()
 _groq_llm_client: Optional[OpenAI] = None
+_groq_fast_client: Optional[OpenAI] = None
+
+
+def _groq_api_key() -> str:
+    return os.environ.get("GROQ_API_KEY", "").strip().strip('"').strip("'")
+
+
+def _new_groq_client(max_retries: int, timeout: float) -> OpenAI:
+    client = OpenAI(
+        api_key=_groq_api_key(),
+        base_url=GROQ_BASE_URL,
+        max_retries=max_retries,
+        timeout=httpx.Timeout(timeout, connect=min(LLM_CONNECT_TIMEOUT_S, timeout)),
+    )
+    return _ls_wrap_openai(client) if tracing_enabled() else client
 
 
 def get_llm_client() -> OpenAI:
-    """Shared, connection-pooled Groq client. Traced as `llm` runs when LangSmith is on."""
+    """Shared, connection-pooled Groq client (generation, judge). Traced as `llm` runs when LangSmith is on.
+
+    Uses `max_retries=3` (SDK exponential backoff, honours Retry-After) and a 30 s timeout
+    (5 s connect). Override with RAG_LLM_MAX_RETRIES / RAG_LLM_TIMEOUT.
+    """
     global _groq_llm_client
     if _groq_llm_client is None:
         with _client_lock:
             if _groq_llm_client is None:
-                client = OpenAI(
-                    api_key=os.environ.get("GROQ_API_KEY", "").strip().strip('"'),
-                    base_url=GROQ_BASE_URL,
-                    max_retries=1,
-                    timeout=30.0,
-                )
-                _groq_llm_client = _ls_wrap_openai(client) if tracing_enabled() else client
+                _groq_llm_client = _new_groq_client(LLM_MAX_RETRIES, LLM_TIMEOUT_S)
     return _groq_llm_client
+
+
+def get_fast_llm_client() -> OpenAI:
+    """Groq client for latency-bounded helper calls (re-ranking, query condensing).
+
+    No automatic retries: callers pass a short per-request `timeout=` and fall back on failure
+    (lexical re-ranking / original query) instead of stacking retries on the user's latency.
+    """
+    global _groq_fast_client
+    if _groq_fast_client is None:
+        with _client_lock:
+            if _groq_fast_client is None:
+                _groq_fast_client = _new_groq_client(0, LLM_TIMEOUT_S)
+    return _groq_fast_client
 
 
 # ------------------------------------------------------------

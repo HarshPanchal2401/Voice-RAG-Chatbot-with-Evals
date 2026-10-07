@@ -1,329 +1,396 @@
 """
 Retrieval Component Metrics
 ===========================
-Evaluates retrieval performance using:
-1. Contextual Recall (DeepEval ContextualRecallMetric)
-2. Contextual Precision (DeepEval ContextualPrecisionMetric)
-3. Information Retrieval (IR) math metrics: Hit@K, Recall@K, MRR@K, NDCG@K, Precision@K
+Relevance is decided on the shared document key (see CONTRACT.md)::
+
+    doc_key = f"{query_id}:{passage_id}"
+
+``passage_id`` / ``chunk_id`` alone are only unique *within* a corpus query group
+(27 / 40 distinct values over 301,752 chunks), so comparing bare passage ids matches
+unrelated passages. Gold keys are built from ``(record.query_id, ground_truth_passage_ids)``;
+retrieved keys from each document's ``doc_key`` (or ``source_query_id``/``query_id`` +
+``passage_id``).
+
+IR metrics (no LLM, exact):
+    hit@k, recall@k, precision@k (divides by k), MRR@k, nDCG@k (binary relevance).
+    Duplicates (several chunks of the same passage) count once: only the first
+    occurrence of a relevant key earns gain, so nDCG <= 1 and precision <= 1.
+
+LLM-judge metrics (DeepEval, failure policy in ``evaluation.metrics.base``):
+    contextual_recall, contextual_precision, context_relevance.
+
+Lexical heuristics (separately named, never substituted for a judge score):
+    lexical_context_jaccard, lexical_answer_coverage.
 """
 
+from __future__ import annotations
+
 import math
-import re
-from typing import List, Dict, Any, Optional, Set, Tuple
-from deepeval.test_case import LLMTestCase
-from deepeval.metrics import ContextualRecallMetric, ContextualPrecisionMetric, ContextualRelevancyMetric
+from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+from evaluation.metrics.base import a_run_metric, collect, failed, outcome, run_metric, skipped
+from evaluation.metrics.text_utils import token_coverage, token_jaccard
+
+NO_CONTEXT = "(no context retrieved)"
+
+
+class MissingDocKeyError(ValueError):
+    """A retrieved document carries no usable (query_id, passage_id) / doc_key."""
+
+
+class StaleSnapshotError(ValueError):
+    """A cached snapshot lacks doc keys (bare passage ids are not unique)."""
 
 
 # ============================================================
-# Quantitative IR Math Metrics (Zero-LLM Fast Computations)
+# Document keys
 # ============================================================
 
-def compute_hit_rate(retrieved_ids: List[int], gt_ids: List[int], k: int = 5) -> float:
-    """Returns 1.0 if at least one ground-truth ID appears in top-K retrieved IDs, else 0.0."""
-    if not gt_ids:
-        return 0.0
-    top_k_ids = retrieved_ids[:k]
-    hits = set(top_k_ids).intersection(set(gt_ids))
-    return 1.0 if len(hits) > 0 else 0.0
+def _norm_id(value: Any) -> str:
+    if isinstance(value, bool):
+        raise MissingDocKeyError(f"invalid id {value!r}")
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    s = str(value).strip()
+    if s.lstrip("-").isdigit():
+        return str(int(s))
+    return s
 
 
-def compute_recall_at_k(retrieved_ids: List[int], gt_ids: List[int], k: int = 5) -> float:
-    """Returns the fraction of ground-truth IDs present in top-K retrieved IDs."""
-    if not gt_ids:
-        return 0.0
-    top_k_ids = retrieved_ids[:k]
-    hits = set(top_k_ids).intersection(set(gt_ids))
-    return round(len(hits) / len(set(gt_ids)), 4)
+def make_doc_key(query_id: Any, passage_id: Any) -> str:
+    if query_id is None or passage_id is None or str(query_id).strip() == "" or str(passage_id).strip() == "":
+        raise MissingDocKeyError(f"cannot build doc_key from query_id={query_id!r}, passage_id={passage_id!r}")
+    return f"{_norm_id(query_id)}:{_norm_id(passage_id)}"
 
 
-def compute_precision_at_k(retrieved_ids: List[int], gt_ids: List[int], k: int = 5) -> float:
-    """Returns the fraction of top-K retrieved IDs that are ground-truth relevant."""
-    if not retrieved_ids or k <= 0:
-        return 0.0
-    top_k_ids = retrieved_ids[:k]
-    hits = set(top_k_ids).intersection(set(gt_ids))
-    return round(len(hits) / min(k, len(top_k_ids)), 4)
+def dedupe(keys: Iterable[Any]) -> List[Any]:
+    seen = set()
+    out = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
 
 
-def compute_mrr(retrieved_ids: List[int], gt_ids: List[int], k: int = 10) -> float:
-    """Returns Mean Reciprocal Rank (1/rank of first relevant item)."""
-    gt_set = set(gt_ids)
-    for rank, rid in enumerate(retrieved_ids[:k], start=1):
-        if rid in gt_set:
+def gold_doc_keys(record: Dict[str, Any]) -> List[str]:
+    """Gold keys of a golden record (deduplicated, order kept)."""
+    if record.get("ground_truth_doc_keys"):
+        return dedupe(str(k) for k in record["ground_truth_doc_keys"])
+    qid = record.get("query_id")
+    pids = record.get("ground_truth_passage_ids") or []
+    return dedupe(make_doc_key(qid, pid) for pid in pids)
+
+
+def doc_key_of(doc: Dict[str, Any]) -> Optional[str]:
+    """doc_key of an in-process document or an API SourceDocument (None if impossible)."""
+    if not isinstance(doc, dict):
+        return None
+    key = doc.get("doc_key")
+    if key:
+        return str(key)
+    qid = doc.get("source_query_id")
+    if qid is None:
+        qid = doc.get("query_id")
+    pid = doc.get("passage_id")
+    if qid is None or pid is None:
+        return None
+    try:
+        return make_doc_key(qid, pid)
+    except MissingDocKeyError:
+        return None
+
+
+def doc_keys_from_documents(docs: Sequence[Dict[str, Any]]) -> List[str]:
+    """Retrieved keys in rank order. Raises MissingDocKeyError if any doc lacks them."""
+    keys = []
+    for i, d in enumerate(docs or []):
+        k = doc_key_of(d)
+        if k is None:
+            raise MissingDocKeyError(
+                f"retrieved document #{i + 1} has no doc_key / (query_id|source_query_id, passage_id); "
+                "bare passage ids are not unique and cannot be scored."
+            )
+        keys.append(k)
+    return keys
+
+
+def snapshot_doc_keys(record: Dict[str, Any]) -> List[str]:
+    """Doc keys stored in a cached snapshot record, or StaleSnapshotError."""
+    keys = record.get("retrieved_doc_keys")
+    if keys is None:
+        raise StaleSnapshotError(
+            "Snapshot record has no 'retrieved_doc_keys' (only bare 'retrieved_passage_ids', which are not "
+            "unique across the corpus). It cannot be scored. Regenerate the snapshot with live retrieval: "
+            "python -m evaluation.combine_datasets snapshot --lang <gu|hi|combined> --sample 300 --mode server"
+        )
+    return [str(k) for k in keys]
+
+
+# ============================================================
+# IR metrics on doc keys
+# ============================================================
+
+def _check_k(k: int) -> int:
+    if not isinstance(k, int) or isinstance(k, bool) or k <= 0:
+        raise ValueError(f"k must be a positive integer, got {k!r}")
+    return k
+
+
+def _gains(retrieved: Sequence[Any], gold: set, k: int) -> List[int]:
+    """Binary gains for the top-k positions; repeated keys earn no further gain."""
+    seen = set()
+    gains = []
+    for key in list(retrieved)[:k]:
+        if key in gold and key not in seen:
+            gains.append(1)
+            seen.add(key)
+        else:
+            gains.append(0)
+    return gains
+
+
+def compute_hit_rate(retrieved_keys: Sequence[Any], gold_keys: Sequence[Any], k: int = 5) -> Optional[float]:
+    """1.0 if any gold key is in the top-k, else 0.0. None when there is no gold."""
+    _check_k(k)
+    gold = set(gold_keys or [])
+    if not gold:
+        return None
+    return 1.0 if any(_gains(retrieved_keys or [], gold, k)) else 0.0
+
+
+def compute_recall_at_k(retrieved_keys: Sequence[Any], gold_keys: Sequence[Any], k: int = 5) -> Optional[float]:
+    """|unique gold keys in top-k| / |unique gold keys|."""
+    _check_k(k)
+    gold = set(gold_keys or [])
+    if not gold:
+        return None
+    return round(sum(_gains(retrieved_keys or [], gold, k)) / len(gold), 4)
+
+
+def compute_precision_at_k(retrieved_keys: Sequence[Any], gold_keys: Sequence[Any], k: int = 5) -> Optional[float]:
+    """|unique relevant keys in top-k| / k  (always divides by k)."""
+    _check_k(k)
+    gold = set(gold_keys or [])
+    if not gold:
+        return None
+    return round(sum(_gains(retrieved_keys or [], gold, k)) / k, 4)
+
+
+def compute_mrr(retrieved_keys: Sequence[Any], gold_keys: Sequence[Any], k: int = 10) -> Optional[float]:
+    """Reciprocal rank of the first relevant key within top-k (0 if none)."""
+    _check_k(k)
+    gold = set(gold_keys or [])
+    if not gold:
+        return None
+    for rank, g in enumerate(_gains(retrieved_keys or [], gold, k), start=1):
+        if g:
             return round(1.0 / rank, 4)
     return 0.0
 
 
-def compute_ndcg(retrieved_ids: List[int], gt_ids: List[int], k: int = 10) -> float:
-    """Computes Normalized Discounted Cumulative Gain at rank K with binary relevance."""
-    gt_set = set(gt_ids)
-    dcg = 0.0
-    for rank, rid in enumerate(retrieved_ids[:k], start=1):
-        if rid in gt_set:
-            dcg += 1.0 / math.log2(rank + 1)
-
-    # Ideal DCG: all ground truth items ranked at top
-    ideal_count = min(len(gt_set), k)
-    if ideal_count == 0:
-        return 0.0
-    idcg = sum(1.0 / math.log2(r + 1) for r in range(1, ideal_count + 1))
-    return round(dcg / idcg, 4) if idcg > 0 else 0.0
+def compute_ndcg(retrieved_keys: Sequence[Any], gold_keys: Sequence[Any], k: int = 10) -> Optional[float]:
+    """Binary-relevance nDCG@k with duplicate keys counted once (always within [0, 1])."""
+    _check_k(k)
+    gold = set(gold_keys or [])
+    if not gold:
+        return None
+    gains = _gains(retrieved_keys or [], gold, k)
+    dcg = sum(g / math.log2(rank + 1) for rank, g in enumerate(gains, start=1))
+    ideal = min(len(gold), k)
+    idcg = sum(1.0 / math.log2(r + 1) for r in range(1, ideal + 1))
+    return round(dcg / idcg, 4) if idcg > 0 else None
 
 
-def compute_context_jaccard(retrieved_contexts: List[str], gt_contexts: List[str]) -> float:
-    """Word-level Jaccard overlap between retrieved passages and ground-truth text."""
-    if not retrieved_contexts or not gt_contexts:
-        return 0.0
-    ret_words = set(re.findall(r"\w+", " ".join(retrieved_contexts).lower()))
-    gt_words = set(re.findall(r"\w+", " ".join(gt_contexts).lower()))
-    if not gt_words:
-        return 0.0
-    intersection = ret_words.intersection(gt_words)
-    union = ret_words.union(gt_words)
-    return round(len(intersection) / len(union), 4) if union else 0.0
+IR_METRICS = ("hit_rate", "recall_at_k", "precision_at_k", "mrr", "ndcg")
+
+
+def ir_metrics(retrieved_keys: Sequence[Any], gold_keys: Sequence[Any], k: int = 5) -> Dict[str, Optional[float]]:
+    return {
+        "hit_rate": compute_hit_rate(retrieved_keys, gold_keys, k),
+        "recall_at_k": compute_recall_at_k(retrieved_keys, gold_keys, k),
+        "precision_at_k": compute_precision_at_k(retrieved_keys, gold_keys, k),
+        "mrr": compute_mrr(retrieved_keys, gold_keys, k),
+        "ndcg": compute_ndcg(retrieved_keys, gold_keys, k),
+    }
 
 
 # ============================================================
-# DeepEval Contextual Recall & Precision (LLM-as-a-Judge)
+# Lexical heuristics (separately named)
 # ============================================================
 
-def _fallback_recall(
-    retrieved_contexts: List[str],
-    expected_output: str,
-    gt_passage_ids: Optional[List[int]],
-    retrieved_passage_ids: Optional[List[int]],
-    gt_contexts: Optional[List[str]]
-) -> Tuple[float, str]:
-    has_pid_hit = False
-    if gt_passage_ids and retrieved_passage_ids:
-        has_pid_hit = len(set(retrieved_passage_ids).intersection(set(gt_passage_ids))) > 0
-
-    all_ctx = " ".join(retrieved_contexts)
-    gt_words = [w for w in re.findall(r"\w+", expected_output) if len(w) > 1]
-    overlap = 0.0
-    if gt_words:
-        overlap = sum(1 for w in gt_words if w in all_ctx) / len(gt_words)
-
-    if has_pid_hit and overlap >= 0.25:
-        return 1.0, "Ground-truth passage retrieved and confirmed by factual overlap."
-    elif has_pid_hit:
-        return 0.95, "Ground-truth passage verified in retrieved candidate pool."
-    elif overlap >= 0.5:
-        return round(max(0.85, overlap), 4), "Heuristic overlap confirmed ground-truth facts in context."
-    elif overlap > 0.0:
-        return round(overlap, 4), "Partial factual overlap detected in retrieved context."
-    return 0.0, "Context lacks ground-truth facts."
+def compute_context_jaccard(retrieved_contexts: List[str], gt_contexts: List[str]) -> Optional[float]:
+    """Token-set Jaccard between retrieved passages and gold passages (shared tokenizer)."""
+    return token_jaccard(retrieved_contexts or [], gt_contexts or [])
 
 
-def _fallback_precision(
-    retrieved_contexts: List[str],
-    expected_output: str,
-    gt_passage_ids: Optional[List[int]],
-    retrieved_passage_ids: Optional[List[int]]
-) -> Tuple[float, str]:
-    if gt_passage_ids and retrieved_passage_ids:
-        gt_set = set(gt_passage_ids)
-        for rank, pid in enumerate(retrieved_passage_ids, start=1):
-            if pid in gt_set:
-                if rank == 1:
-                    return 1.0, "Ground-truth passage ranked at position 1."
-                elif rank == 2:
-                    return 0.85, "Ground-truth passage ranked near top at position 2."
-                elif rank == 3:
-                    return 0.75, "Ground-truth passage ranked in top 3."
-                elif rank == 4:
-                    return 0.65, "Ground-truth passage ranked in top 4."
-                else:
-                    return round(max(0.55, 1.0 / rank), 4), f"Ground-truth passage retrieved at rank {rank}."
-
-    # Lexical rank fallback
-    gt_words = [w for w in re.findall(r"\w+", expected_output) if len(w) > 1]
-    if gt_words and retrieved_contexts:
-        scores = []
-        for ctx in retrieved_contexts:
-            ov = sum(1 for w in gt_words if w in ctx) / len(gt_words)
-            scores.append(ov)
-        if any(s > 0 for s in scores):
-            best_rank = scores.index(max(scores)) + 1
-            if best_rank == 1:
-                return 0.95, "Most relevant lexical context ranked at position 1."
-            elif best_rank == 2:
-                return 0.80, "Most relevant lexical context ranked at position 2."
-            elif best_rank == 3:
-                return 0.70, "Most relevant lexical context ranked at position 3."
-            elif best_rank == 4:
-                return 0.60, "Most relevant lexical context ranked at position 4."
-            else:
-                return round(max(0.50, 1.0 / best_rank), 4), f"Most relevant context ranked at position {best_rank}."
-
-    return 0.0, "No relevant retrieved context identified."
+def compute_answer_coverage(expected_output: str, retrieved_contexts: List[str]) -> Optional[float]:
+    """Fraction of distinct reference-answer tokens present in the retrieved passages."""
+    return token_coverage(expected_output, retrieved_contexts or [])
 
 
-def compute_contextual_recall(
-    question: str,
-    retrieved_contexts: List[str],
-    expected_output: str,
-    model: Any,
-    threshold: float = 0.7,
-    gt_passage_ids: Optional[List[int]] = None,
-    retrieved_passage_ids: Optional[List[int]] = None,
-    gt_contexts: Optional[List[str]] = None
-) -> Dict[str, Any]:
-    """
-    Measures Contextual Recall via DeepEval:
-    Does the retrieved context contain all key facts required to produce expected output?
-    """
-    contexts = retrieved_contexts if retrieved_contexts else ["No context retrieved."]
-    test_case = LLMTestCase(
+# ============================================================
+# LLM-judge metrics
+# ============================================================
+
+def _ctx_test_case(question: str, contexts: List[str], expected_output: Optional[str], actual_output: Optional[str] = None):
+    from deepeval.test_case import LLMTestCase
+
+    return LLMTestCase(
         input=question,
-        actual_output=expected_output,
+        actual_output=actual_output if actual_output is not None else (expected_output or ""),
         expected_output=expected_output,
-        retrieval_context=contexts
+        retrieval_context=list(contexts),
     )
 
-    metric = ContextualRecallMetric(threshold=threshold, model=model, include_reason=True)
-    try:
-        metric.measure(test_case)
-        score = round(float(metric.score), 4)
-        reason = metric.reason or "Context covers all essential facts."
-        return {"score": score, "reason": reason, "success": score >= threshold}
-    except Exception as e:
-        fb_score, fb_reason = _fallback_recall(contexts, expected_output, gt_passage_ids, retrieved_passage_ids, gt_contexts)
-        return {"score": fb_score, "reason": f"[heuristic fallback: judge failed] {fb_reason} (DeepEval notice: {str(e)})", "success": fb_score >= threshold, "fallback": True}
+
+def _recall_metric(model: Any, threshold: float, async_mode: bool):
+    from deepeval.metrics import ContextualRecallMetric
+
+    return ContextualRecallMetric(threshold=threshold, model=model, include_reason=True, async_mode=async_mode)
 
 
-def compute_contextual_precision(
-    question: str,
-    retrieved_contexts: List[str],
-    expected_output: str,
-    model: Any,
-    threshold: float = 0.7,
-    gt_passage_ids: Optional[List[int]] = None,
-    retrieved_passage_ids: Optional[List[int]] = None
-) -> Dict[str, Any]:
-    """
-    Measures Contextual Precision via DeepEval:
-    Are relevant context passages ranked above non-relevant passages?
-    """
-    contexts = retrieved_contexts if retrieved_contexts else ["No context retrieved."]
-    test_case = LLMTestCase(
-        input=question,
-        actual_output=expected_output,
-        expected_output=expected_output,
-        retrieval_context=contexts
-    )
+def _precision_metric(model: Any, threshold: float, async_mode: bool):
+    from deepeval.metrics import ContextualPrecisionMetric
 
-    metric = ContextualPrecisionMetric(threshold=threshold, model=model, include_reason=True)
-    try:
-        metric.measure(test_case)
-        score = round(float(metric.score), 4)
-        reason = metric.reason or "Relevant passages ranked favorably."
-        return {"score": score, "reason": reason, "success": score >= threshold}
-    except Exception as e:
-        fb_score, fb_reason = _fallback_precision(contexts, expected_output, gt_passage_ids, retrieved_passage_ids)
-        return {"score": fb_score, "reason": f"[heuristic fallback: judge failed] {fb_reason} (DeepEval notice: {str(e)})", "success": fb_score >= threshold, "fallback": True}
+    return ContextualPrecisionMetric(threshold=threshold, model=model, include_reason=True, async_mode=async_mode)
+
+
+def _relevancy_metric(model: Any, threshold: float, async_mode: bool):
+    from deepeval.metrics import ContextualRelevancyMetric
+
+    return ContextualRelevancyMetric(threshold=threshold, model=model, include_reason=True, async_mode=async_mode)
+
+
+def _precheck(question: str, contexts: List[str], expected: Optional[str], model: Any, needs_expected: bool):
+    if model is None:
+        return failed("no judge model configured")
+    if needs_expected and not (expected or "").strip():
+        return skipped("no reference answer")
+    if not [c for c in (contexts or []) if (c or "").strip()]:
+        # Deterministic rule (not a heuristic): nothing retrieved -> nothing recalled/relevant.
+        return outcome(0.0, reason="No context was retrieved.")
+    return None
+
+
+def compute_contextual_recall(question: str, retrieved_contexts: List[str], expected_output: str,
+                              model: Any, threshold: float = 0.7, **_: Any) -> Dict[str, Any]:
+    """DeepEval ContextualRecall: does the retrieved context contain the facts of the reference answer?"""
+    pre = _precheck(question, retrieved_contexts, expected_output, model, True)
+    if pre is not None:
+        return pre
+    return run_metric(_recall_metric(model, threshold, False), _ctx_test_case(question, retrieved_contexts, expected_output))
+
+
+async def a_compute_contextual_recall(question: str, retrieved_contexts: List[str], expected_output: str,
+                                      model: Any, threshold: float = 0.7, **_: Any) -> Dict[str, Any]:
+    pre = _precheck(question, retrieved_contexts, expected_output, model, True)
+    if pre is not None:
+        return pre
+    return await a_run_metric(_recall_metric(model, threshold, True), _ctx_test_case(question, retrieved_contexts, expected_output))
+
+
+def compute_contextual_precision(question: str, retrieved_contexts: List[str], expected_output: str,
+                                 model: Any, threshold: float = 0.7, **_: Any) -> Dict[str, Any]:
+    """DeepEval ContextualPrecision: are relevant passages ranked above irrelevant ones?"""
+    pre = _precheck(question, retrieved_contexts, expected_output, model, True)
+    if pre is not None:
+        return pre
+    return run_metric(_precision_metric(model, threshold, False), _ctx_test_case(question, retrieved_contexts, expected_output))
+
+
+async def a_compute_contextual_precision(question: str, retrieved_contexts: List[str], expected_output: str,
+                                         model: Any, threshold: float = 0.7, **_: Any) -> Dict[str, Any]:
+    pre = _precheck(question, retrieved_contexts, expected_output, model, True)
+    if pre is not None:
+        return pre
+    return await a_run_metric(_precision_metric(model, threshold, True), _ctx_test_case(question, retrieved_contexts, expected_output))
+
+
+def compute_context_relevance(question: str, retrieved_contexts: List[str], model: Any,
+                              threshold: float = 0.5) -> Dict[str, Any]:
+    """DeepEval ContextualRelevancy: are the retrieved passages relevant to the question?"""
+    pre = _precheck(question, retrieved_contexts, None, model, False)
+    if pre is not None:
+        return pre
+    return run_metric(_relevancy_metric(model, threshold, False), _ctx_test_case(question, retrieved_contexts, None, ""))
+
+
+async def a_compute_context_relevance(question: str, retrieved_contexts: List[str], model: Any,
+                                      threshold: float = 0.5) -> Dict[str, Any]:
+    pre = _precheck(question, retrieved_contexts, None, model, False)
+    if pre is not None:
+        return pre
+    return await a_run_metric(_relevancy_metric(model, threshold, True), _ctx_test_case(question, retrieved_contexts, None, ""))
+
+
+RETRIEVAL_LLM_METRICS = ("contextual_recall", "contextual_precision")
+
+
+def _ir_and_lexical(retrieved_contexts, retrieved_doc_keys, gold_keys, gt_contexts, expected_output, k):
+    res: Dict[str, Dict[str, Any]] = {}
+    for name, val in ir_metrics(retrieved_doc_keys, gold_keys, k).items():
+        res[name] = outcome(val) if val is not None else skipped("no gold passages")
+    res["lexical_context_jaccard"] = outcome(compute_context_jaccard(retrieved_contexts, gt_contexts or [])) \
+        if gt_contexts else skipped("no gold contexts")
+    cov = compute_answer_coverage(expected_output, retrieved_contexts)
+    res["lexical_answer_coverage"] = outcome(cov) if cov is not None else skipped("no reference answer")
+    return res
 
 
 def evaluate_retrieval_record(
     question: str,
     retrieved_contexts: List[str],
-    retrieved_passage_ids: List[int],
-    gt_contexts: List[str],
-    gt_passage_ids: List[int],
+    retrieved_doc_keys: List[str],
+    gold_keys: List[str],
     expected_output: str,
     model: Optional[Any] = None,
     k: int = 5,
-    run_llm_metrics: bool = True
+    llm_metrics: Sequence[str] = RETRIEVAL_LLM_METRICS,
+    gt_contexts: Optional[List[str]] = None,
+    thresholds: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
-    """
-    Evaluates retrieval strictly on Contextual Recall and Contextual Precision.
-    """
-    ctx_recall = {"score": 0.0, "reason": "Evaluated without LLM judge"}
-    ctx_precision = {"score": 0.0, "reason": "Evaluated without LLM judge"}
-
-    if run_llm_metrics and model:
-        ctx_recall = compute_contextual_recall(
-            question, retrieved_contexts, expected_output, model,
-            gt_passage_ids=gt_passage_ids,
-            retrieved_passage_ids=retrieved_passage_ids,
-            gt_contexts=gt_contexts
-        )
-        ctx_precision = compute_contextual_precision(
-            question, retrieved_contexts, expected_output, model,
-            gt_passage_ids=gt_passage_ids,
-            retrieved_passage_ids=retrieved_passage_ids
-        )
-    else:
-        # Fallback to lexical/passage ID heuristics if LLM judge is not configured
-        recall_k = compute_recall_at_k(retrieved_passage_ids, gt_passage_ids, k=k)
-        precision_k = compute_precision_at_k(retrieved_passage_ids, gt_passage_ids, k=k)
-        ctx_recall = {"score": recall_k, "reason": "Heuristic fallback via passage overlap"}
-        ctx_precision = {"score": precision_k, "reason": "Heuristic fallback via precision @ K"}
-
-    return {
-        "contextual_recall": ctx_recall["score"],
-        "contextual_recall_reason": ctx_recall.get("reason", ""),
-        "contextual_precision": ctx_precision["score"],
-        "contextual_precision_reason": ctx_precision.get("reason", ""),
-        "k": k
-    }
+    """IR metrics on doc keys (+ lexical heuristics) and the requested judge metrics."""
+    thresholds = thresholds or {}
+    res = _ir_and_lexical(retrieved_contexts, retrieved_doc_keys, gold_keys, gt_contexts, expected_output, k)
+    if "contextual_recall" in llm_metrics:
+        res["contextual_recall"] = compute_contextual_recall(
+            question, retrieved_contexts, expected_output, model, thresholds.get("contextual_recall", 0.7))
+    if "contextual_precision" in llm_metrics:
+        res["contextual_precision"] = compute_contextual_precision(
+            question, retrieved_contexts, expected_output, model, thresholds.get("contextual_precision", 0.7))
+    out = collect(res)
+    out["k"] = k
+    return out
 
 
-# ============================================================
-# DeepEval Contextual Relevancy (Pipeline Level)
-# ============================================================
-
-def _fallback_context_relevance(
-    question: str,
-    retrieved_contexts: List[str]
-) -> Tuple[float, str]:
-    if not question or not retrieved_contexts:
-        return 0.0, "Empty question or retrieved contexts."
-
-    q_words = [w for w in re.findall(r"\w+", question.lower()) if len(w) > 2]
-    if not q_words:
-        return 0.75, "Short question; contexts treated as relevant."
-
-    hits = 0
-    for ctx in retrieved_contexts:
-        ctx_lower = ctx.lower()
-        if any(w in ctx_lower for w in q_words):
-            hits += 1
-
-    ratio = hits / len(retrieved_contexts)
-    if ratio >= 0.8:
-        return 1.0, f"High context relevancy ({hits}/{len(retrieved_contexts)} passages contain query entities)."
-    elif ratio >= 0.5:
-        return 0.8, f"Moderate context relevancy ({hits}/{len(retrieved_contexts)} passages contain query entities)."
-    elif ratio > 0.0:
-        return round(max(0.4, ratio), 4), f"Partial context relevancy ({hits}/{len(retrieved_contexts)} passages contain query entities)."
-    return 0.0, "No query entities found in retrieved contexts."
-
-
-def compute_context_relevance(
+async def a_evaluate_retrieval_record(
     question: str,
     retrieved_contexts: List[str],
-    model: Any,
-    threshold: float = 0.5
+    retrieved_doc_keys: List[str],
+    gold_keys: List[str],
+    expected_output: str,
+    model: Optional[Any] = None,
+    k: int = 5,
+    llm_metrics: Sequence[str] = RETRIEVAL_LLM_METRICS,
+    gt_contexts: Optional[List[str]] = None,
+    thresholds: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
-    """
-    Measures Contextual Relevancy via DeepEval:
-    Evaluates whether the retrieved context passages are strictly relevant to the question.
-    """
-    contexts = retrieved_contexts if retrieved_contexts else ["No context retrieved."]
-    test_case = LLMTestCase(
-        input=question,
-        actual_output="",
-        retrieval_context=contexts
-    )
+    import asyncio
 
-    metric = ContextualRelevancyMetric(threshold=threshold, model=model, include_reason=True)
-    try:
-        metric.measure(test_case)
-        score = round(float(metric.score), 4)
-        reason = metric.reason or "Retrieved contexts are relevant to the query."
-        return {"score": score, "reason": reason, "success": score >= threshold}
-    except Exception as e:
-        fb_score, fb_reason = _fallback_context_relevance(question, contexts)
-        return {"score": fb_score, "reason": f"[heuristic fallback: judge failed] {fb_reason} (DeepEval notice: {str(e)})", "success": fb_score >= threshold, "fallback": True}
-
+    thresholds = thresholds or {}
+    res = _ir_and_lexical(retrieved_contexts, retrieved_doc_keys, gold_keys, gt_contexts, expected_output, k)
+    names, coros = [], []
+    if "contextual_recall" in llm_metrics:
+        names.append("contextual_recall")
+        coros.append(a_compute_contextual_recall(question, retrieved_contexts, expected_output, model,
+                                                 thresholds.get("contextual_recall", 0.7)))
+    if "contextual_precision" in llm_metrics:
+        names.append("contextual_precision")
+        coros.append(a_compute_contextual_precision(question, retrieved_contexts, expected_output, model,
+                                                    thresholds.get("contextual_precision", 0.7)))
+    for name, r in zip(names, await asyncio.gather(*coros)):
+        res[name] = r
+    out = collect(res)
+    out["k"] = k
+    return out

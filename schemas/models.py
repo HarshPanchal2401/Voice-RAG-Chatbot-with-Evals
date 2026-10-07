@@ -4,8 +4,20 @@ Domain Data Models & Response Components
 Pydantic models for latency profiling, source documents, evaluation scores, and language metadata.
 """
 
-from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ChatTurn(BaseModel):
+    """One previous conversation message (oldest first in `history`)."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"role": "user", "content": "મેનહટન પ્રોજેક્ટ શું હતો?"}]}
+    )
+
+    role: Literal["user", "assistant"] = Field(..., description="Who wrote the message.")
+    content: str = Field(..., min_length=1, max_length=4000, description="Message text (max 4000 chars).")
 
 
 class RetrievalTimings(BaseModel):
@@ -15,6 +27,7 @@ class RetrievalTimings(BaseModel):
     rrf_ms: float = Field(default=0.0, description="Reciprocal Rank Fusion and initial sorting time in ms.")
     metadata_ms: float = Field(default=0.0, description="SQLite metadata retrieval time in ms.")
     rerank_ms: Optional[float] = Field(default=None, description="Re-ranking time in ms (if enabled).")
+    condense_ms: Optional[float] = Field(default=None, description="Follow-up question condensing time in ms (when history was used).")
     retrieval_total_ms: float = Field(default=0.0, description="Total time for retrieval pipeline in ms.")
 
 
@@ -30,8 +43,12 @@ class LatencyBreakdown(BaseModel):
 
 class SourceDocument(BaseModel):
     rank: int = Field(..., description="Rank in top-k results.")
-    chunk_id: int = Field(..., description="Unique chunk ID.")
-    passage_id: int = Field(..., description="Passage ID.")
+    vector_id: Optional[int] = Field(None, description="Globally unique vector / chunk row id.")
+    source_query_id: Optional[int] = Field(None, description="Corpus query group the chunk belongs to (chunks.query_id).")
+    doc_key: Optional[str] = Field(None, description="Relevance key '<source_query_id>:<passage_id>' (unique passage id).")
+    chunk_id: int = Field(..., description="Chunk id (unique only within its source_query_id).")
+    passage_id: int = Field(..., description="Passage id (unique only within its source_query_id).")
+    part_id: Optional[int] = Field(None, description="Part of a long passage split into several chunks.")
     url: Optional[str] = Field(None, description="Source URL.")
     title: Optional[str] = Field(None, description="Article title.")
     section: Optional[str] = Field(None, description="Section heading.")
@@ -42,10 +59,10 @@ class SourceDocument(BaseModel):
     sparse_rank: Optional[int] = Field(None, description="Rank from sparse search.")
     dense_score: Optional[float] = Field(None, description="Dense cosine similarity score.")
     sparse_score: Optional[float] = Field(None, description="Sparse lexical dot product score.")
-    rerank_score: Optional[float] = Field(None, description="Score assigned by re-ranker (if applied).")
+    rerank_score: Optional[float] = Field(None, description="Re-ranker relevance score (higher = more relevant), if applied.")
     rerank_rank: Optional[int] = Field(None, description="Rank after re-ranking.")
     original_rank: Optional[int] = Field(None, description="Rank prior to re-ranking.")
-    rerank_reason: Optional[str] = Field(None, description="Reasoning provided by listwise re-ranker.")
+    rerank_reason: Optional[str] = Field(None, description="Reasoning provided by the re-ranker.")
 
 
 class EvaluationScores(BaseModel):
@@ -66,7 +83,8 @@ class EvaluationResult(BaseModel):
     query_type: Optional[str] = Field(None, description="Golden query type (e.g. NUMERIC, ENTITY, DESCRIPTION).")
     ground_truth_answer: Optional[str] = Field(None, description="Ground truth reference answer (if golden).")
     warning: Optional[str] = Field(None, description="Notice if query is non-golden.")
-    scores: Optional[EvaluationScores] = Field(None, description="Evaluation scorecard.")
+    scores: Optional[EvaluationScores] = Field(None, description="Evaluation scorecard (a score is null when its judge call failed).")
+    failed_metrics: Optional[List[str]] = Field(None, description="Metrics whose judge call failed (their scores are null).")
 
 
 class LanguageInfo(BaseModel):
@@ -77,3 +95,9 @@ class LanguageInfo(BaseModel):
     indexed_passages: int = Field(..., description="Total vectors indexed in FAISS.")
     golden_dataset_records: int = Field(..., description="Total golden evaluation records.")
     is_active: bool = Field(True, description="Whether language pipeline is loaded and ready.")
+
+
+class SampleQuery(BaseModel):
+    question: str = Field(..., description="Golden dataset question.")
+    query_type: Optional[str] = Field(None, description="Golden query type.")
+    query_id: Optional[int] = Field(None, description="Golden query id (pass it back as `query_id` to force golden matching).")

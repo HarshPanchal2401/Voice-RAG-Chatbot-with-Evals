@@ -1,23 +1,44 @@
 """
 FastAPI Dependencies
 ====================
-Provides dependency-injected access to application state (Router, VoiceService).
-Gracefully self-heals if app state is accessed outside lifespan.
+Dependency-injected access to application state (LanguageRouter, VoiceService).
+
+The heavy objects are created once by the app lifespan. If they are missing (startup still
+running, failed, or the app is mounted without its lifespan) the request gets a fast 503
+instead of silently loading BGE-M3 + FAISS indexes inside a request (minutes, racy, OOM-prone).
 """
 
-from fastapi import Request
-from pipeline.router import LanguageRouter
-from services.voice_service import VoiceService
+from typing import Any, Optional
+
+from fastapi import HTTPException, Request
 
 
-def get_router(request: Request) -> LanguageRouter:
-    if not hasattr(request.app.state, "router") or request.app.state.router is None:
-        request.app.state.router = LanguageRouter(verbose=False)
-    return request.app.state.router
+def router_from_state(app: Any) -> Optional[Any]:
+    return getattr(app.state, "router", None)
 
 
-def get_voice_service(request: Request) -> VoiceService:
-    if not hasattr(request.app.state, "voice_service") or request.app.state.voice_service is None:
-        router = get_router(request)
-        request.app.state.voice_service = VoiceService(groq_client=router.groq_client)
-    return request.app.state.voice_service
+def voice_service_from_state(app: Any) -> Optional[Any]:
+    return getattr(app.state, "voice_service", None)
+
+
+def get_router(request: Request):
+    router = router_from_state(request.app)
+    if router is None:
+        raise HTTPException(
+            status_code=503,
+            detail="RAG pipelines are not loaded yet (server starting or failed to start). Retry shortly.",
+            headers={"Retry-After": "30"},
+        )
+    return router
+
+
+def get_voice_service(request: Request):
+    voice_service = voice_service_from_state(request.app)
+    if voice_service is None:
+        raise HTTPException(status_code=503, detail="Voice service is not available.", headers={"Retry-After": "30"})
+    return voice_service
+
+
+def get_optional_voice_service(request: Request):
+    """Voice service or None (text endpoints only need it when `voice_reply` is requested)."""
+    return voice_service_from_state(request.app)

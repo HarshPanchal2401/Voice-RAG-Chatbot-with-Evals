@@ -1,15 +1,60 @@
-__pycache__
-*.pyc
-*.pyo
-*.pyd
+# ==============================================================================
+# Voice RAG System (v3) - Docker build context filter
+# Only what the server needs at runtime goes into the image.
+# ==============================================================================
+
+# --- Secrets: never bake API keys into an image (pass --env-file at run time) ---
+.env
+.env.*
+*.env
+!.env.example
+
+# --- VCS / IDE / OS ---
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Python caches & virtualenvs ---
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
 .Python
 env/
 venv/
 .venv/
-.env.local
-.git
-.gitignore
-.vscode
-.idea
-*.log
+ENV/
+*.egg-info/
+
+# --- Tooling output / caches ---
 .deepeval
+*.log
+deepeval_test_results.json
+evaluation/reports/
+
+# --- Not needed at runtime ---
+tests/
+test/
+adiitional_test_notebook/
+**/.ipynb_checkpoints
+*.ipynb
+Data/threads_store.json
+Data/*/*.sqlite
+Dockerfile
+.dockerignore
+
+# --- Index bundle: keep only what the pipeline loads ---
+# kept: voice_rag_builder/*/pipeline_manifest.json, voice_rag_builder/*/bge_m3_*,
+#       voice_rag_builder/*/passage_metadata.sqlite
+# dropped (~1.2 GB, only used to build the indexes / offline evaluation):
+voice_rag_builder/*/*passages.jsonl
+voice_rag_builder/*/passage_metadata.jsonl
+voice_rag_builder/*/*eval.jsonl
+
+# kept: Data/<lang>/golden_dataset_*.jsonl (evaluator) and Data/combined/

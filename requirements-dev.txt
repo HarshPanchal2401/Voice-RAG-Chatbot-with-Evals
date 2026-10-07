@@ -1,0 +1,5 @@
+# Test and developer extras for the Voice RAG System (v3)
+-r requirements.txt
+pytest>=8.0
+# Microphone capture for the CLI chatbot (chatbot.py)
+sounddevice>=0.4.6

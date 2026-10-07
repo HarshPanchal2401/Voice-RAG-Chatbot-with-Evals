@@ -9,6 +9,7 @@ from api.routes_query import router as query_router
 from api.routes_stream import router as stream_router
 from api.routes_retrieval import router as retrieval_router
 from api.routes_evaluation import router as evaluation_router
+from api.routes_feedback import router as feedback_router
 
 __all__ = [
     "system_router",
@@ -16,4 +17,5 @@ __all__ = [
     "stream_router",
     "retrieval_router",
     "evaluation_router",
+    "feedback_router",
 ]

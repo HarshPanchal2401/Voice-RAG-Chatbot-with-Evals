@@ -1,246 +1,194 @@
 """
 Retriever Component Evaluator
 =============================
-Evaluates the RAG Retrieval Component exclusively on:
-- Contextual Recall (DeepEval): Does the retrieved context contain all key facts required by the expected answer?
-- Contextual Precision (DeepEval): Are the relevant passages ranked above irrelevant ones in the retrieved context?
+Scores retrieval on the shared doc key (``query_id:passage_id``):
+
+* IR metrics (exact, no LLM): hit@k, recall@k, precision@k, MRR@k, nDCG@k
+* optional judge metrics: contextual_recall, contextual_precision
+* lexical heuristics (separately named): lexical_context_jaccard, lexical_answer_coverage
+
+``compare_rerank=True`` runs both arms on every query against the same live index with
+the same k and the same scorer (arm A: hybrid RRF order, arm B: the pipeline's own
+reranker via ``use_reranker=True``) and reports a paired comparison per metric
+(mean difference with bootstrap 95% CI, bootstrap p-value and sign test).
 """
 
-import time
-from typing import List, Dict, Any, Optional
-from tqdm import tqdm
+from __future__ import annotations
 
+import asyncio
+from typing import Any, Dict, List, Optional, Sequence
+
+from evaluation.components.common import (
+    base_record,
+    error_record,
+    gold_doc_keys,
+    latency_block,
+    make_judge,
+    progress,
+    reference_answer,
+    run_concurrently,
+)
 from evaluation.config import EvaluationConfig
-from evaluation.client import RAGClient
-from evaluation.metrics.retrieval_metrics import evaluate_retrieval_record
-from services.evaluation_service import GroqDeepEvalModel
-from core.tracing import traceable
+from evaluation.metrics.aggregate import aggregate_records
+from evaluation.metrics.retrieval_metrics import (
+    IR_METRICS,
+    RETRIEVAL_LLM_METRICS,
+    StaleSnapshotError,
+    a_evaluate_retrieval_record,
+    doc_keys_from_documents,
+    snapshot_doc_keys,
+)
+from evaluation.metrics.stats import paired_bootstrap, sign_test
 
 
 class RetrieverEvaluator:
-    """Evaluates RAG retrieval solely on Contextual Recall and Contextual Precision."""
-
     def __init__(
         self,
-        router: Optional[Any] = None,
-        client: Optional[RAGClient] = None,
+        client: Any = None,
         config: Optional[EvaluationConfig] = None,
-        run_llm_metrics: bool = True,
-        use_reranker: bool = False
+        llm_metrics: Sequence[str] = RETRIEVAL_LLM_METRICS,
+        use_reranker: bool = False,
+        judge: Any = None,
+        show_progress: bool = True,
+        router: Any = None,  # deprecated, ignored (use client)
+        run_llm_metrics: Optional[bool] = None,  # deprecated alias
     ):
         self.config = config or EvaluationConfig()
-        self.client = client or RAGClient(fallback_router=router)
-        self.run_llm_metrics = run_llm_metrics
+        if client is None:
+            raise ValueError("RetrieverEvaluator needs a RAGClient (explicit --mode server|inprocess).")
+        self.client = client
+        if run_llm_metrics is False:
+            llm_metrics = ()
+        self.llm_metrics = tuple(llm_metrics)
         self.use_reranker = use_reranker
+        self.show_progress = show_progress
+        self.judge = judge if judge is not None else (make_judge(self.config) if self.llm_metrics else None)
 
-        # LLM judge for Contextual Recall & Precision
-        self.judge_model = None
-        if self.run_llm_metrics:
-            self.judge_model = GroqDeepEvalModel(
-                model_name=self.config.judge_model_name,
-                api_key=self.config.groq_api_key
-            )
-
-        self.reranker = None
-        if self.use_reranker:
-            from pipeline.reranker import RAGReranker
-            self.reranker = RAGReranker(
-                model_name=self.config.judge_model_name,
-                api_key=self.config.groq_api_key
-            )
-
-    @traceable(run_type="chain", name="eval_retriever_query")
-    def evaluate_query(
-        self,
-        question: str,
-        gt_contexts: List[str],
-        gt_passage_ids: List[int],
-        expected_output: str,
-        lang: str = "gu",
-        k: int = 5,
-        precomputed_contexts: Optional[List[str]] = None,
-        precomputed_pids: Optional[List[int]] = None,
-        precomputed_timings: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """Runs or uses pre-retrieved chunks and measures Contextual Recall and Precision."""
-        # 1. Fetch candidate chunks (with optional Re-ranking)
-        if self.use_reranker and self.reranker:
-            if self.client.is_server_online():
-                t0 = time.perf_counter()
-                fetch_k = max(10, k * 2)
-                ret_res = self.client.retrieve(question, language=lang, top_k=fetch_k)
-                ret_ms = (time.perf_counter() - t0) * 1000
-                cand_docs = ret_res.get("documents", [])
-                timings = ret_res.get("timings", {})
-            elif precomputed_contexts:
-                cand_docs = [
-                    {"text": t, "passage_id": p}
-                    for t, p in zip(precomputed_contexts, precomputed_pids or [0] * len(precomputed_contexts))
-                ]
-                timings = dict(precomputed_timings or {})
-                ret_ms = timings.get("retrieval_total_ms", 0.0)
-            else:
-                t0 = time.perf_counter()
-                ret_res = self.client.retrieve(question, language=lang, top_k=k)
-                ret_ms = (time.perf_counter() - t0) * 1000
-                cand_docs = ret_res.get("documents", [])
-                timings = ret_res.get("timings", {})
-
-            # Run Reranker on candidates
-            reranked_docs, rerank_ms = self.reranker.rerank(question, cand_docs, top_k=k)
-            retrieved_texts = [d.get("text", "") for d in reranked_docs]
-            retrieved_pids = [d.get("passage_id", d.get("chunk_id", 0)) for d in reranked_docs]
-            timings["rerank_ms"] = rerank_ms
-            ret_ms += rerank_ms
-        elif precomputed_contexts is not None and len(precomputed_contexts) > 0:
-            retrieved_texts = precomputed_contexts[:k]
-            retrieved_pids = (precomputed_pids or [])[:k]
-            timings = precomputed_timings or {}
-            ret_ms = timings.get("retrieval_total_ms", 0.0)
-        else:
-            t0 = time.perf_counter()
-            ret_res = self.client.retrieve(question, language=lang, top_k=k)
-            ret_ms = (time.perf_counter() - t0) * 1000
-
-            retrieved_docs = ret_res.get("documents", [])
-            retrieved_texts = [d.get("text", "") for d in retrieved_docs]
-            retrieved_pids = [d.get("passage_id", d.get("chunk_id", 0)) for d in retrieved_docs]
-            timings = ret_res.get("timings", {})
-
-        # 2. Evaluate Contextual Recall and Contextual Precision
-        metric_res = evaluate_retrieval_record(
-            question=question,
-            retrieved_contexts=retrieved_texts,
-            retrieved_passage_ids=retrieved_pids,
-            gt_contexts=gt_contexts,
-            gt_passage_ids=gt_passage_ids,
-            expected_output=expected_output,
-            model=self.judge_model if self.run_llm_metrics else None,
-            k=k,
-            run_llm_metrics=self.run_llm_metrics
-        )
-
+    # ---------------------------------------------------------------- phase 1
+    def _live(self, record: Dict[str, Any], k: int, use_reranker: bool) -> Dict[str, Any]:
+        res = self.client.retrieve(record["question"], language=record["language"], top_k=k,
+                                   use_reranker=use_reranker)
+        docs = res.get("documents") or []
+        timings = dict(res.get("timings") or {})
+        timings["client_ms"] = res.get("client_ms")
         return {
-            "query": question,
-            "language": lang,
-            "retrieved_count": len(retrieved_texts),
-            "retrieved_passage_ids": retrieved_pids,
-            "ground_truth_passage_ids": gt_passage_ids,
+            "doc_keys": doc_keys_from_documents(docs),
+            "contexts": [d.get("text", "") for d in docs],
             "timings": timings,
-            "retrieval_total_ms": ret_ms,
-            "metrics": metric_res
+            "original_ranks": [d.get("original_rank") for d in docs],
         }
 
-    def evaluate_dataset(
-        self,
-        records: List[Dict[str, Any]],
-        k: int = 5,
-        show_progress: bool = True
-    ) -> Dict[str, Any]:
-        """Evaluates an entire dataset of queries through the retriever on Contextual Recall and Precision."""
-        results = []
-        iterator = tqdm(records, desc=f"Evaluating Retriever (k={k})") if show_progress else records
+    def _cached(self, record: Dict[str, Any], k: int) -> Dict[str, Any]:
+        if record.get("retrieval_error"):
+            raise RuntimeError(f"snapshot retrieval error: {record['retrieval_error']}")
+        keys = snapshot_doc_keys(record)  # raises StaleSnapshotError for bare passage ids
+        return {"doc_keys": keys[:k], "contexts": list(record.get("retrieved_contexts") or [])[:k],
+                "timings": dict(record.get("retrieval_timings") or {}), "original_ranks": []}
 
-        for record in iterator:
-            question = record.get("question", "")
-            gt_contexts = record.get("ground_truth_contexts", [])
-            gt_pids = record.get("ground_truth_passage_ids", [])
-            expected = record.get("ground_truth_answer", record.get("expected_output", ""))
-            lang = record.get("language", "gu")
-            cached = self.config.use_cached
-            pre_contexts = record.get("retrieved_contexts") if cached else None
-            pre_pids = record.get("retrieved_passage_ids") if cached else None
-            pre_timings = record.get("retrieval_timings") if cached else None
-
+    def collect(self, records: List[Dict[str, Any]], k: int, arms: Sequence[str]) -> List[Dict[str, Any]]:
+        out = []
+        for record in progress(records, f"Retrieving (k={k}, arms={','.join(arms)})", self.show_progress):
+            item = {"record": record, "arms": {}, "error": None}
             try:
-                res = self.evaluate_query(
-                    question=question,
-                    gt_contexts=gt_contexts,
-                    gt_passage_ids=gt_pids,
-                    expected_output=expected,
-                    lang=lang,
-                    k=k,
-                    precomputed_contexts=pre_contexts,
-                    precomputed_pids=pre_pids,
-                    precomputed_timings=pre_timings
-                )
-                res["query_id"] = record.get("query_id")
-                res["query_type"] = record.get("query_type", "UNKNOWN")
-                results.append(res)
-            except Exception as e:
-                print(f"⚠️ Error evaluating query '{question[:30]}...': {e}")
+                for arm in arms:
+                    if self.config.use_cached:
+                        item["arms"][arm] = self._cached(record, k)
+                    else:
+                        item["arms"][arm] = self._live(record, k, use_reranker=(arm == "rerank"))
+            except StaleSnapshotError:
+                raise
+            except Exception as e:  # noqa: BLE001 - pipeline errors become error records
+                item["error"] = e
+            out.append(item)
+        return out
 
-        # Compute aggregate averages for Contextual Recall and Precision
-        aggregates = self._aggregate_results(results)
+    # ---------------------------------------------------------------- phase 2
+    async def _score(self, item: Dict[str, Any], arm: str, k: int) -> Dict[str, Any]:
+        record = item["record"]
+        if item["error"] is not None:
+            return error_record(record, item["error"], "retrieval")
+        data = item["arms"][arm]
+        gold = gold_doc_keys(record)
+        res = await a_evaluate_retrieval_record(
+            question=record["question"],
+            retrieved_contexts=data["contexts"],
+            retrieved_doc_keys=data["doc_keys"],
+            gold_keys=gold,
+            expected_output=reference_answer(record),
+            model=self.judge,
+            k=k,
+            llm_metrics=self.llm_metrics,
+            gt_contexts=record.get("ground_truth_contexts") or [],
+            thresholds=self.config.thresholds,
+        )
+        out = base_record(record)
+        out.update({
+            "status": "ok",
+            "arm": arm,
+            "retrieved_doc_keys": data["doc_keys"],
+            "gold_doc_keys": gold,
+            "retrieved_count": len(data["doc_keys"]),
+            "timings": data["timings"],
+            "original_ranks": data.get("original_ranks") or [],
+            **res,
+        })
+        return out
 
+    async def a_evaluate_dataset(self, records: List[Dict[str, Any]], k: int = 5,
+                                 compare_rerank: bool = False) -> Dict[str, Any]:
+        if compare_rerank and self.config.use_cached:
+            raise ValueError("--compare-rerank needs live retrieval (both arms against the same index); drop --use-cached.")
+        arms = ("base", "rerank") if compare_rerank else (("rerank",) if self.use_reranker else ("base",))
+        items = self.collect(records, k, arms)
+        per_arm: Dict[str, List[Dict[str, Any]]] = {}
+        for arm in arms:
+            per_arm[arm] = await run_concurrently(
+                items, lambda it, a=arm: self._score(it, a, k), self.config.concurrency,
+                desc=f"Scoring retrieval [{arm}]", show_progress=self.show_progress)
+        metric_names = list(IR_METRICS) + list(self.llm_metrics) + ["lexical_context_jaccard", "lexical_answer_coverage"]
+        if not compare_rerank:
+            arm = arms[0]
+            return {
+                "component": "retriever_reranked" if arm == "rerank" else "retriever",
+                "k": k,
+                "llm_metrics": list(self.llm_metrics),
+                "use_reranker": arm == "rerank",
+                "evaluated_queries": sum(1 for r in per_arm[arm] if r["status"] == "ok"),
+                "aggregates": aggregate_records(per_arm[arm], metric_names, n_boot=self.config.n_boot, seed=self.config.seed),
+                "latency": latency_block(per_arm[arm], self.config.warmup),
+                "details": per_arm[arm],
+            }
+        base, rer = per_arm["base"], per_arm["rerank"]
+        paired = {}
+        groups = [r.get("query_id") for r in base]
+        for m in metric_names:
+            a = [r.get("scores", {}).get(m) if r["status"] == "ok" else None for r in base]
+            b = [r.get("scores", {}).get(m) if r["status"] == "ok" else None for r in rer]
+            if not any(v is not None for v in a) or not any(v is not None for v in b):
+                continue
+            paired[m] = {**paired_bootstrap(a, b, groups=groups, n_boot=self.config.n_boot, seed=self.config.seed),
+                         "sign_test": sign_test(a, b)}
         return {
-            "component": "retriever",
-            "evaluated_queries": len(results),
+            "component": "retriever_rerank_comparison",
             "k": k,
-            "llm_metrics_enabled": self.run_llm_metrics,
-            "aggregates": aggregates,
-            "details": results
+            "llm_metrics": list(self.llm_metrics),
+            "evaluated_queries": sum(1 for r in base if r["status"] == "ok"),
+            "arms": {
+                "no_rerank": {"aggregates": aggregate_records(base, metric_names, n_boot=self.config.n_boot, seed=self.config.seed),
+                              "latency": latency_block(base, self.config.warmup)},
+                "rerank": {"aggregates": aggregate_records(rer, metric_names, n_boot=self.config.n_boot, seed=self.config.seed),
+                           "latency": latency_block(rer, self.config.warmup)},
+            },
+            "paired_comparison": {"definition": "diff = rerank - no_rerank, paired per query; 95% bootstrap CI "
+                                                "clustered by query_id; sign test on per-query wins",
+                                  "metrics": paired},
+            "aggregates": aggregate_records(rer, metric_names, n_boot=self.config.n_boot, seed=self.config.seed),
+            "details": [{"query_id": b.get("query_id"), "language": b.get("language"), "no_rerank": b, "rerank": r}
+                        for b, r in zip(base, rer)],
         }
 
-    def _aggregate_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not results:
-            return {}
-
-        n = len(results)
-        sums = {
-            "contextual_recall": 0.0,
-            "contextual_precision": 0.0,
-            "retrieval_total_ms": 0.0,
-        }
-
-        by_type: Dict[str, Dict[str, float]] = {}
-        by_lang: Dict[str, Dict[str, float]] = {}
-
-        for r in results:
-            m = r["metrics"]
-            q_type = r.get("query_type", "UNKNOWN")
-            q_lang = r.get("language", "UNKNOWN")
-
-            sums["contextual_recall"] += m.get("contextual_recall", 0.0)
-            sums["contextual_precision"] += m.get("contextual_precision", 0.0)
-            sums["retrieval_total_ms"] += r.get("retrieval_total_ms", 0.0)
-
-            # Accumulate by query_type
-            if q_type not in by_type:
-                by_type[q_type] = {"count": 0, "recall": 0.0, "precision": 0.0}
-            by_type[q_type]["count"] += 1
-            by_type[q_type]["recall"] += m.get("contextual_recall", 0.0)
-            by_type[q_type]["precision"] += m.get("contextual_precision", 0.0)
-
-            # Accumulate by language
-            if q_lang not in by_lang:
-                by_lang[q_lang] = {"count": 0, "recall": 0.0, "precision": 0.0}
-            by_lang[q_lang]["count"] += 1
-            by_lang[q_lang]["recall"] += m.get("contextual_recall", 0.0)
-            by_lang[q_lang]["precision"] += m.get("contextual_precision", 0.0)
-
-        averages = {k: round(v / n, 4) for k, v in sums.items()}
-
-        type_breakdown = {}
-        for qt, data in by_type.items():
-            c = data["count"]
-            type_breakdown[qt] = {
-                "count": c,
-                "contextual_recall": round(data["recall"] / c, 4),
-                "contextual_precision": round(data["precision"] / c, 4)
-            }
-
-        lang_breakdown = {}
-        for lg, data in by_lang.items():
-            c = data["count"]
-            lang_breakdown[lg] = {
-                "count": c,
-                "contextual_recall": round(data["recall"] / c, 4),
-                "contextual_precision": round(data["precision"] / c, 4)
-            }
-
-        return {
-            "overall_averages": averages,
-            "breakdown_by_query_type": type_breakdown,
-            "breakdown_by_language": lang_breakdown
-        }
+    def evaluate_dataset(self, records: List[Dict[str, Any]], k: int = 5, compare_rerank: bool = False,
+                         show_progress: Optional[bool] = None) -> Dict[str, Any]:
+        if show_progress is not None:
+            self.show_progress = show_progress
+        return asyncio.run(self.a_evaluate_dataset(records, k=k, compare_rerank=compare_rerank))
