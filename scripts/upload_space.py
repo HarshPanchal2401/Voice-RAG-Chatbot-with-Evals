@@ -18,6 +18,7 @@ IGNORE = [
     "Data/*/golden_dataset_full.jsonl",
     "Data/*/*.sqlite",
     "Data/threads_store.json",
+    "Data/voice_quota.json",
     "adiitional_test_notebook/*",
     "evaluation/reports/*",
     "evaluation/.judge_cache/*",

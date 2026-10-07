@@ -140,11 +140,22 @@
   };
   const saveSettings = () => store.set(KEYS.settings, S.settings);
 
+  // Anonymous browser id: lets the server count voice uses per user (together with the IP).
+  const CLIENT_ID = (() => {
+    let id = store.raw('vr_client_id');
+    if (!id || !/^[A-Za-z0-9_-]{8,64}$/.test(id)) {
+      id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'c' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      store.setRaw('vr_client_id', id);
+    }
+    return id;
+  })();
+
   // ------------------------------------------------------------------ API
   async function api(path, opts) {
     opts = opts || {};
     const headers = Object.assign({}, opts.headers || {});
     if (S.apiKey) headers['X-API-Key'] = S.apiKey;
+    headers['X-Client-Id'] = CLIENT_ID;
     const res = await fetch(path, Object.assign({}, opts, { headers }));
     if (res.status === 401) {
       S.apiKey = ''; store.setRaw(KEYS.key, null);
@@ -155,7 +166,8 @@
       let detail = null;
       try { detail = (await res.json()).detail; } catch (e) { /* ignore */ }
       let msg = formatDetail(detail, 'Request failed (' + res.status + ').');
-      if (res.status === 429) msg = 'Too many requests. Please wait ' + (res.headers.get('Retry-After') || 'a few') + ' seconds.';
+      if (res.status === 429 && !detail) msg = 'Too many requests. Please wait ' + (res.headers.get('Retry-After') || 'a few') + ' seconds.';
+      if (res.status === 429 && /voice/i.test(msg)) refreshQuota();
       if (res.status === 413) msg = 'The audio file is too large.';
       throw new Error(msg);
     }
@@ -325,6 +337,7 @@
       const d = await r.json();
       msg.ttsLoading = false;
       buildPlayer(msg, new Blob([b64ToBytes(d.audio_base64)], { type: 'audio/mpeg' }), true);
+      refreshQuota();
     } catch (e) {
       msg.ttsLoading = false; updateSpeakBtn(msg);
       toast(e.message || 'Could not generate audio', 'error');
@@ -636,6 +649,37 @@
     }
   }
 
+  // ------------------------------------------------------------------ voice quota
+  async function refreshQuota() {
+    const box = $('voice-quota');
+    try {
+      const r = await api('/api/v1/voice/quota');
+      const q = await r.json();
+      S.quota = q;
+      if (!q.enabled) { box.hidden = true; return; }
+      box.hidden = false;
+      const left = q.remaining == null ? q.limit : q.remaining;
+      const pct = q.limit ? Math.round((left / q.limit) * 100) : 0;
+      box.className = 'quota' + (left === 0 || q.global_exhausted ? ' empty' : left <= 1 ? ' low' : '');
+      const done = left === 0 || q.global_exhausted;
+      let note = q.lifetime ? (done ? 'Voice limit used. You can still type your questions.' : 'Free voice uses (total, not daily)') : (q.window_hours === 24 ? 'today' : 'per ' + q.window_hours + ' h');
+      if (done && q.reset_in_seconds) {
+        const h = Math.floor(q.reset_in_seconds / 3600), m = Math.round((q.reset_in_seconds % 3600) / 60);
+        note = 'resets in ' + (h ? h + ' h ' : '') + m + ' min';
+      }
+      box.innerHTML = '<div class="quota-row"><span>Voice uses left</span><strong>' + (q.global_exhausted ? 0 : left) + ' / ' + q.limit + '</strong></div>' +
+        '<div class="quota-bar"><span style="width:' + (q.global_exhausted ? 0 : pct) + '%"></span></div><div class="quota-note">' + esc(note) + '</div>';
+      const mic = $('mic-btn');
+      mic.title = done ? 'Voice limit used — type your question instead' : left + ' voice uses left';
+      mic.classList.toggle('locked', done);
+      mic.setAttribute('aria-disabled', String(done));
+      $('attach-btn').classList.toggle('locked', done);
+      $('opt-voice').disabled = done;
+      if (done) { $('opt-voice').checked = false; S.settings.voiceReply = false; saveSettings(); }
+    } catch (e) { box.hidden = true; }
+  }
+  const quotaBlocked = () => !!(S.quota && S.quota.enabled && (S.quota.remaining === 0 || S.quota.global_exhausted));
+
   // ------------------------------------------------------------------ stats + recent
   function recordQuery(question, lang, ok, totalMs) {
     const st = store.get(KEYS.stats, { count: 0, ok: 0, ms: 0, timed: 0 });
@@ -755,6 +799,7 @@
       const res = await api('/api/v1/query/text/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ctrl.signal });
       for await (const { event, data } of readSSE(res)) {
         if (event === 'token') { msg.answer += data.token || ''; renderStreaming(msg); }
+        else if (event === 'voice_limit') { toast(data.message || 'Voice limit reached.', 'error'); refreshQuota(); }
         else if (event === 'tts') {
           if (data.audio_base64) { const bytes = b64ToBytes(data.audio_base64); ttsParts[data.seq || ttsParts.length] = bytes; enqueueChunk(bytes); }
         } else if (event === 'meta') {
@@ -797,6 +842,7 @@
       const caret = msg.els.text.querySelector('.caret'); if (caret) caret.classList.remove('caret');
       setBusy(false);
       recordQuery(question, msg.answerLang || S.lang, ok, total);
+      if (S.settings.voiceReply) refreshQuota();
       input.focus();
     }
   }
@@ -805,6 +851,7 @@
   async function toggleMic() {
     if (S.recorder) { S.recorder.stop(); return; }
     if (S.busy) return;
+    if (quotaBlocked()) { toast('You have used all your free voice uses. You can still type your questions.', 'error'); return; }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
       toast(window.isSecureContext ? 'Voice recording is not supported in this browser.' : 'The microphone needs HTTPS or localhost.', 'error');
       return;
@@ -893,6 +940,7 @@
       S.abort = null;
       setBusy(false);
       recordQuery(question, msg.answerLang || S.lang, ok, total);
+      refreshQuota();
     }
   }
 
@@ -1108,7 +1156,7 @@
     $('composer').addEventListener('submit', (e) => { e.preventDefault(); ask(input.value); });
     $('stop-btn').addEventListener('click', () => { if (S.abort) S.abort.abort('user'); stopAllAudio(); });
     $('mic-btn').addEventListener('click', toggleMic);
-    $('attach-btn').addEventListener('click', () => $('file-input').click());
+    $('attach-btn').addEventListener('click', () => { if (quotaBlocked()) { toast('You have used all your free voice uses.', 'error'); return; } $('file-input').click(); });
     $('file-input').addEventListener('change', (e) => {
       const f = e.target.files && e.target.files[0];
       e.target.value = '';
@@ -1131,7 +1179,7 @@
     renderStats();
     renderRecent();
     updateSend();
-    checkHealth().then(loadSamples);
+    checkHealth().then(() => { loadSamples(); refreshQuota(); });
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

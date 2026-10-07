@@ -2,7 +2,8 @@
 Voice quota (protects the Sarvam AI free-tier budget)
 ====================================================
 Every request that calls Sarvam (speech-to-text and/or text-to-speech) costs one "voice use".
-Each user gets `RAG_VOICE_LIMIT_PER_USER` uses per `RAG_VOICE_LIMIT_WINDOW_HOURS` (default 5 / 24 h).
+Each user gets `RAG_VOICE_LIMIT_PER_USER` uses in total (default 5, never resets).
+Set `RAG_VOICE_LIMIT_WINDOW_HOURS` > 0 to make it a rolling window instead.
 
 Who is "a user"? There are no accounts, so a user is identified two ways and BOTH are counted:
   - an anonymous browser id (header `X-Client-Id`, query `client_id` for WebSockets), and
@@ -40,8 +41,10 @@ def limit_per_user() -> int:
     return _int_env("RAG_VOICE_LIMIT_PER_USER", 5)
 
 
-def window_seconds() -> int:
-    return max(1, _int_env("RAG_VOICE_LIMIT_WINDOW_HOURS", 24)) * 3600
+def window_seconds() -> Optional[int]:
+    """None = lifetime limit (never resets). Default: lifetime."""
+    hours = _int_env("RAG_VOICE_LIMIT_WINDOW_HOURS", 0)
+    return hours * 3600 if hours > 0 else None
 
 
 def global_daily_limit() -> int:
@@ -106,10 +109,12 @@ class VoiceQuota:
 
     # ---------- core ----------
     def _prune(self, now: float) -> None:
-        user_cut = now - window_seconds()
+        win = window_seconds()
         day_cut = now - 86400
         for k in list(self._usage):
-            cut = day_cut if k == _GLOBAL_KEY else user_cut
+            if k != _GLOBAL_KEY and win is None:
+                continue  # lifetime limit: keep every use forever
+            cut = day_cut if k == _GLOBAL_KEY else now - win
             kept = [t for t in self._usage[k] if t > cut]
             if kept:
                 self._usage[k] = kept
@@ -120,7 +125,8 @@ class VoiceQuota:
         limit = limit_per_user()
         used = max((len(self._usage.get(k, [])) for k in keys), default=0)
         oldest = [self._usage[k][0] for k in keys if self._usage.get(k)]
-        reset_in = int(max(0, min(oldest) + window_seconds() - now)) if (oldest and used >= limit) else 0
+        win = window_seconds()
+        reset_in = int(max(0, min(oldest) + win - now)) if (win and oldest and used >= limit) else 0
         g_limit = global_daily_limit()
         g_used = len(self._usage.get(_GLOBAL_KEY, []))
         global_blocked = g_limit > 0 and g_used >= g_limit
@@ -131,7 +137,8 @@ class VoiceQuota:
             "limit": limit,
             "used": min(used, limit) if limit > 0 else used,
             "remaining": max(0, limit - used) if limit > 0 else None,
-            "window_hours": window_seconds() // 3600,
+            "window_hours": (window_seconds() // 3600) if window_seconds() else None,
+            "lifetime": window_seconds() is None,
             "reset_in_seconds": reset_in,
             "global_exhausted": global_blocked,
             "allowed": (limit <= 0 or used < limit) and not global_blocked,
@@ -165,7 +172,8 @@ def limit_message(st: Dict[str, object]) -> str:
     if st.get("global_exhausted"):
         base = "The daily voice budget for this demo is used up."
     else:
-        base = f"Voice limit reached ({st.get('limit')} voice uses per {st.get('window_hours')} h)."
+        base = (f"You have used all {st.get('limit')} free voice uses." if st.get("lifetime")
+                else f"Voice limit reached ({st.get('limit')} voice uses per {st.get('window_hours')} h).")
     secs = int(st.get("reset_in_seconds") or 0)
     if secs:
         h, m = divmod(secs // 60, 60)

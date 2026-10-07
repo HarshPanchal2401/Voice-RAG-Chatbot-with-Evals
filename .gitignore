@@ -75,3 +75,6 @@ adiitional_test_notebook/
 Thumbs.db
 desktop.ini
 *.log
+
+# Voice quota usage (runtime state)
+Data/voice_quota.json

@@ -64,6 +64,12 @@ RAG_RATE_LIMIT_PER_MIN=30
 RAG_MAX_UPLOAD_MB=10
 RAG_WS_MAX_SECONDS=60
 
+# Voice quota (protects the Sarvam AI budget). Users = browser id + IP.
+RAG_VOICE_LIMIT_PER_USER=5          # total voice uses per user (0 = unlimited)
+RAG_VOICE_LIMIT_WINDOW_HOURS=0       # 0 = all-time limit (never resets); e.g. 24 = daily
+RAG_VOICE_GLOBAL_DAILY_LIMIT=0       # all users together per day (0 = off)
+RAG_TRUST_PROXY=0                    # 1 behind Hugging Face / Cloudflare to read the real visitor IP
+
 # Observability (optional)
 LANGSMITH_TRACING=true
 LANGSMITH_API_KEY=...
@@ -112,6 +118,72 @@ python scripts/build_fp16_index.py --lang hindi
 ```
 
 ---
+
+## Deploy to Hugging Face Spaces (free)
+
+The app runs on a free **Gradio + ZeroGPU** Space (Docker Spaces need a PRO plan). `space_app.py` downloads the indexes from a private dataset, reports ZeroGPU startup and serves the FastAPI app + web UI on port 7860. Everything runs on CPU.
+
+Replace `harshpanchal241` with your Hugging Face username. Run the commands from the `v3` folder in PowerShell.
+
+### 1. Log in (token with **Write** access, from your own account)
+```powershell
+hf auth login
+hf auth whoami          # must print your username
+```
+
+### 2. Upload the indexes to a private dataset (one time, ~3.2 GB)
+```powershell
+hf repos create harshpanchal241/voice-rag-indexes --repo-type dataset --private
+hf upload harshpanchal241/voice-rag-indexes voice_rag_builder . --repo-type dataset --include "*/bge_m3_*" --include "*/passage_metadata.sqlite" --include "*/pipeline_manifest.json"
+```
+
+### 3. Create the Space
+On huggingface.co: **New → Space** → SDK **Gradio** → template **Blank** → hardware **ZeroGPU (Free)** → **Public**. Name it `voice-rag`.
+
+### 4. Add secrets (Space → Settings → Variables and secrets → New secret)
+| Name | Value |
+| :--- | :--- |
+| `GROQ_API_KEY` | Groq key |
+| `SARVAM_API_KEY` | Sarvam key |
+| `RAG_API_KEY` | app key users enter in the UI |
+| `HF_TOKEN` | token **from the same account that owns the dataset** |
+| `RAG_INDEX_REPO` | `harshpanchal241/voice-rag-indexes` (variable is fine) |
+
+Optional variables: `RAG_VOICE_LIMIT_PER_USER` (default `5`, all-time), `RAG_VOICE_LIMIT_WINDOW_HOURS` (`0` = never resets), `RAG_VOICE_GLOBAL_DAILY_LIMIT`, `LANGSMITH_TRACING` / `LANGSMITH_API_KEY`.
+
+### 5. Upload the code
+```powershell
+python scripts/upload_space.py --dry-run    # list the files that will be sent
+python scripts/upload_space.py              # upload (never sends .env or the indexes)
+```
+Use this script instead of `hf upload --exclude "*..."`: on Windows the shell expands the `*` patterns and the command fails.
+
+### 6. Check it
+Open the Space → **Logs**. A healthy start shows:
+```
+HF_TOKEN belongs to 'harshpanchal241'
+✅ [fetch_indexes] Done.
+✅ [space_app] ZeroGPU startup reported.
+✅ [LanguageRouter] Registered language: Gujarati (GU)
+INFO:     Uvicorn running on http://0.0.0.0:7860
+```
+App URL: `https://harshpanchal241-voice-rag.hf.space`
+
+### Update after code changes
+```powershell
+python scripts/upload_space.py
+```
+
+### Troubleshooting
+| Log message | Fix |
+| :--- | :--- |
+| `RAG_INDEX_REPO is not set` | Add the `RAG_INDEX_REPO` variable. |
+| `404 ... voice-rag-indexes` | `HF_TOKEN` is missing or from another account; use a token from the dataset owner (or make the dataset public). |
+| `No @spaces.GPU function detected` | Upload the latest `space_app.py` (it reports ZeroGPU startup). |
+| `402 Payment Required` | You picked Docker; create the Space with the **Gradio** SDK. |
+| `403 ... namespace` | Wrong username in the command; check `hf auth whoami`. |
+
+Notes: the free Space sleeps after 48 h without visitors. Voice-use counts survive restarts but reset when the Space is rebuilt (new upload).
 
 ## API
 
