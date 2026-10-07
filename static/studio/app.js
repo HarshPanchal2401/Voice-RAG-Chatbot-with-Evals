@@ -113,14 +113,18 @@
       title: '👋 नमस्ते, मैं आपका AI सहायक हूँ',
       sub: 'कृपया अपना सवाल पूछें या नीचे दिए गए नमूना प्रश्नों में से किसी एक को चुनें।',
       placeholder: 'अपना संदेश लिखें या आवाज़ का उपयोग करें… (Type your message or use voice)',
+      short: 'अपना सवाल लिखें…',
     },
     gu: {
       name: 'Gujarati', short: 'GU', locale: 'gu-IN',
       title: '👋 નમસ્તે, હું તમારો AI સહાયક છું',
       sub: 'કૃપા કરીને તમારો પ્રશ્ન પૂછો અથવા નીચે આપેલા નમૂના પ્રશ્નોમાંથી એક પસંદ કરો.',
       placeholder: 'તમારો સંદેશ લખો અથવા અવાજનો ઉપયોગ કરો… (Type your message or use voice)',
+      short: 'તમારો પ્રશ્ન લખો…',
     },
   };
+  const mqNarrow = window.matchMedia('(max-width: 860px)');
+  const placeholderText = () => (mqNarrow.matches ? L[S.lang].short : L[S.lang].placeholder);
   const LANG_LABEL = { hi: 'Hindi', gu: 'Gujarati', en: 'English' };
 
   // ------------------------------------------------------------------ state
@@ -200,7 +204,7 @@
     document.body.classList.toggle('lang-hi', S.lang === 'hi');
     $('welcome-title').textContent = t.title;
     $('welcome-sub').textContent = t.sub;
-    $('composer-input').placeholder = t.placeholder;
+    $('composer-input').placeholder = placeholderText();
     document.querySelectorAll('.seg-btn').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.lang === S.lang)));
     if (!opts || opts.load !== false) loadSamples();
   }
@@ -361,6 +365,7 @@
     col.append(bubble, meta);
     row.append(el('div', 'avatar user', svg('user')), col);
     $('thread').appendChild(row);
+    document.querySelector('.chat-card').classList.add('has-msgs');
     scrollToEnd(true);
     return { row, bubble };
   }
@@ -898,7 +903,7 @@
     b.innerHTML = svg(on ? 'stop' : 'mic');
     $('rec-timer').hidden = !on;
     $('rec-timer').textContent = '0:00';
-    $('composer-input').placeholder = on ? 'Listening… tap the red button to send' : L[S.lang].placeholder;
+    $('composer-input').placeholder = on ? 'Listening… tap the red button to send' : placeholderText();
   }
 
   async function sendVoice(blob, filename) {
@@ -1105,6 +1110,7 @@
     stopAllAudio();
     document.querySelectorAll('.msg').forEach((m) => m.remove());
     S.history = [];
+    document.querySelector('.chat-card').classList.remove('has-msgs');
     renderChips();
     $('composer-input').focus();
   }
@@ -1175,6 +1181,7 @@
       }
     });
 
+    mqNarrow.addEventListener && mqNarrow.addEventListener('change', () => { if (!S.recorder) $('composer-input').placeholder = placeholderText(); });
     setLang(S.lang, { load: false });
     renderStats();
     renderRecent();
