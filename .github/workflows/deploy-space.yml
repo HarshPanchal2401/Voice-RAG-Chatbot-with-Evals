@@ -22,17 +22,28 @@ jobs:
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       SPACE_ID: ${{ vars.HF_SPACE_ID || 'harshpanchal241/voice-rag' }}
+    defaults:
+      run:
+        shell: bash          # bash -eo pipefail: a failing command in a pipe fails the step
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Install Hugging Face client
         run: pip install "huggingface_hub>=0.24,<2.0"
+
+      - name: Check required files are committed
+        run: |
+          missing=0
+          for f in v3/app.py v3/space_app.py v3/requirements.txt v3/README.md                    v3/scripts/upload_space.py v3/scripts/fetch_indexes.py                    v3/core/voice_quota.py v3/core/security.py v3/static/index.html v3/static/studio/app.js; do
+            if [ ! -f "$f" ]; then echo "::error file=$f::$f is not in the repository. Commit and push the whole v3 folder (git add v3)."; missing=1; fi
+          done
+          exit $missing
 
       - name: Check token
         run: |
