@@ -1,4 +1,6 @@
-# Deploys v3/ to the Hugging Face Space on every push to main that changes v3/.
+# Deploys the Voice RAG app to the Hugging Face Space on every push to main.
+# Works whether the app files are at the repository root (app.py, space_app.py, ...)
+# or inside a v3/ folder.
 # Setup once: GitHub repo → Settings → Secrets and variables → Actions → New repository secret
 #   HF_TOKEN = a Write token from the Hugging Face account that owns the Space
 name: Deploy to Hugging Face Space
@@ -6,9 +8,6 @@ name: Deploy to Hugging Face Space
 on:
   push:
     branches: [main]
-    paths:
-      - "v3/**"
-      - ".github/workflows/deploy-space.yml"
   workflow_dispatch:          # "Run workflow" button for manual deploys
 
 concurrency:                  # never run two deploys at once; the newest wins
@@ -37,11 +36,20 @@ jobs:
       - name: Install Hugging Face client
         run: pip install "huggingface_hub>=0.24,<2.0"
 
+      - name: Find the app folder
+        run: |
+          if [ -f v3/app.py ]; then APP_DIR=v3; elif [ -f app.py ]; then APP_DIR=.; else
+            echo "::error::Could not find app.py at the repository root or in v3/."; exit 1; fi
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+          echo "App folder: $APP_DIR"
+
       - name: Check required files are committed
         run: |
           missing=0
-          for f in v3/app.py v3/space_app.py v3/requirements.txt v3/README.md                    v3/scripts/upload_space.py v3/scripts/fetch_indexes.py                    v3/core/voice_quota.py v3/core/security.py v3/static/index.html v3/static/studio/app.js; do
-            if [ ! -f "$f" ]; then echo "::error file=$f::$f is not in the repository. Commit and push the whole v3 folder (git add v3)."; missing=1; fi
+          for f in app.py space_app.py requirements.txt README.md \
+                   scripts/upload_space.py scripts/fetch_indexes.py \
+                   core/voice_quota.py core/security.py static/index.html static/studio/app.js; do
+            if [ ! -f "$APP_DIR/$f" ]; then echo "::error file=$APP_DIR/$f::$APP_DIR/$f is not in the repository. Commit and push it."; missing=1; fi
           done
           exit $missing
 
@@ -51,15 +59,18 @@ jobs:
           python -c "from huggingface_hub import whoami; print('Deploying as', whoami()['name'])"
 
       - name: Compile Python (catch syntax errors before deploying)
-        run: python -m compileall -q v3/app.py v3/space_app.py v3/api v3/core v3/pipeline v3/schemas v3/services v3/scripts
+        working-directory: ${{ env.APP_DIR }}
+        run: python -m compileall -q app.py space_app.py api core pipeline schemas services scripts
 
       - name: Files that will be uploaded
-        run: python v3/scripts/upload_space.py --repo "$SPACE_ID" --dry-run | tail -n 5
+        working-directory: ${{ env.APP_DIR }}
+        run: python scripts/upload_space.py --repo "$SPACE_ID" --dry-run | tail -n 5
 
       - name: Upload to the Space
+        working-directory: ${{ env.APP_DIR }}
         env:
           DEPLOY_MESSAGE: "Deploy ${{ github.sha }}: ${{ github.event.head_commit.message }}"
-        run: python v3/scripts/upload_space.py --repo "$SPACE_ID" --sync
+        run: python scripts/upload_space.py --repo "$SPACE_ID" --sync
 
       - name: Summary
         run: |
