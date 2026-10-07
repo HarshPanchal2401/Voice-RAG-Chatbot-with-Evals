@@ -1,0 +1,42 @@
+{
+  "dataset_name": "Gujarati Voice & Text RAG Golden Evaluation Dataset",
+  "version": "1.0",
+  "language": "Gujarati (gu-IN)",
+  "language_code": "gu",
+  "description": "Curated golden question-context-answer triples for Gujarati retrieval and generation evaluation.",
+  "statistics": {
+    "total_golden_records": 18463,
+    "raw_eval_queries_analyzed": 30000,
+    "unanswerable_queries_excluded": 11522,
+    "missing_positive_passage_excluded": 15,
+    "query_types": {
+      "DESCRIPTION": 11346,
+      "PERSON": 484,
+      "LOCATION": 1407,
+      "NUMERIC": 3528,
+      "ENTITY": 1698
+    },
+    "avg_question_char_length": 32.65,
+    "avg_answer_char_length": 99.62,
+    "avg_positive_passages_per_query": 1.07
+  },
+  "subsets": {
+    "golden_dataset_full.jsonl": "18463 records (Comprehensive evaluation)",
+    "golden_dataset_sample_500.jsonl": "500 records (Standard benchmark)",
+    "golden_dataset_sample_100.jsonl": "100 records (Fast test benchmark)"
+  },
+  "sample_100_type_breakdown": {
+    "DESCRIPTION": 61,
+    "ENTITY": 9,
+    "NUMERIC": 19,
+    "LOCATION": 8,
+    "PERSON": 3
+  },
+  "sample_500_type_breakdown": {
+    "ENTITY": 46,
+    "DESCRIPTION": 307,
+    "NUMERIC": 96,
+    "LOCATION": 38,
+    "PERSON": 13
+  }
+}

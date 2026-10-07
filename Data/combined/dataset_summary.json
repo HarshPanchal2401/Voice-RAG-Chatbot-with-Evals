@@ -1,0 +1,67 @@
+{
+  "description": "Unified 15-sample Golden Benchmark Datasets for Voice RAG System (v3)",
+  "total_sample_size": 15,
+  "language_distribution": {
+    "gujarati": 8,
+    "hindi": 7,
+    "total": 15
+  },
+  "retrieval_dataset": {
+    "file": "retrieval_golden_dataset.jsonl",
+    "samples": 15,
+    "features": [
+      "question",
+      "k",
+      "retrieved_contexts",
+      "retrieved_passage_ids",
+      "retrieved_scores",
+      "expected_output",
+      "ground_truth_contexts",
+      "ground_truth_passage_ids"
+    ],
+    "metrics": [
+      "contextual_recall",
+      "contextual_precision"
+    ]
+  },
+  "generator_dataset": {
+    "file": "generator_golden_dataset.jsonl",
+    "samples": 15,
+    "features": [
+      "question",
+      "contexts",
+      "generated_answer",
+      "ground_truth_answer",
+      "generation_timings"
+    ],
+    "metrics": [
+      "faithfulness",
+      "answer_relevance"
+    ]
+  },
+  "pipeline_dataset": {
+    "file": "pipeline_golden_dataset.jsonl",
+    "samples": 15,
+    "features": [
+      "question",
+      "k",
+      "retrieved_contexts",
+      "retrieved_passage_ids",
+      "retrieved_scores",
+      "retrieval_timings",
+      "generated_answer",
+      "generation_timings",
+      "ground_truth_answer",
+      "ground_truth_contexts",
+      "ground_truth_passage_ids"
+    ],
+    "metrics": [
+      "faithfulness",
+      "answer_relevance",
+      "context_relevance",
+      "correctness",
+      "completeness",
+      "toxicity"
+    ]
+  }
+}

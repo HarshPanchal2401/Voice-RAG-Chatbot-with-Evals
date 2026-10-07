@@ -4,9 +4,11 @@
 
 # User Specified Exclusions
 voice_rag_builder/
-Data/
-tests/
-test/
+# Data: keep the small golden samples (the app and the Space need them), skip big/runtime files
+Data/*/golden_dataset_full.jsonl
+Data/*/*.sqlite
+Data/threads_store.json
+Data/voice_quota.json
 adiitional_test_notebook/
 
 # Secrets & Environment Configurations

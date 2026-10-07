@@ -7,6 +7,7 @@ Usage:
     python scripts/upload_space.py --repo USER/SPACE --dry-run
 """
 import argparse
+import os
 import fnmatch
 from pathlib import Path
 
@@ -33,6 +34,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default="harshpanchal241/voice-rag")
     ap.add_argument("--dry-run", action="store_true", help="only list the files that would be uploaded")
+    ap.add_argument("--sync", action="store_true", help="also delete code files on the Space that no longer exist locally")
     args = ap.parse_args()
 
     if args.dry_run:
@@ -52,7 +54,10 @@ def main() -> None:
         repo_type="space",
         folder_path=str(ROOT),
         ignore_patterns=IGNORE,
-        commit_message="Deploy Voice RAG",
+        # --sync: remove stale code/static files (never touches .gitattributes or the README card)
+        delete_patterns=(["*.py", "static/**", "scripts/**", "api/**", "core/**", "pipeline/**", "schemas/**",
+                          "services/**", "evaluation/**", "tests/**", "requirements*.txt"] if args.sync else None),
+        commit_message=os.environ.get("DEPLOY_MESSAGE", "Deploy Voice RAG"),
     )
     print(f"✅ Uploaded: {info}")
     print(f"🔗 https://huggingface.co/spaces/{args.repo}")

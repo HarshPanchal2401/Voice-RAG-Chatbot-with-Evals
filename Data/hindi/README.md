@@ -1,0 +1,27 @@
+# Hindi Golden Evaluation Dataset for Voice & Text RAG
+
+## Overview
+- **Language**: Hindi (`hi`, `hi-IN`)
+- **Total Valid Golden Records**: 18,463
+- **Average Question Length**: 37.85 characters
+- **Average Answer Length**: 96.56 characters
+- **Average Positive Passages**: 1.07
+
+## Dataset Files
+| Filename | Records | Purpose |
+|---|---|---|
+| `golden_dataset_full.jsonl` | 18,463 | Complete golden ground-truth evaluation set |
+| `golden_dataset_sample_500.jsonl` | 500 | Standard evaluation benchmark |
+| `golden_dataset_sample_100.jsonl` | 100 | Rapid CI/CD test benchmark |
+| `dataset_summary.json` | - | Summary statistics and type distributions |
+
+## Query Type Breakdown
+```json
+{
+  "DESCRIPTION": 11346,
+  "PERSON": 484,
+  "LOCATION": 1407,
+  "NUMERIC": 3528,
+  "ENTITY": 1698
+}
+```
